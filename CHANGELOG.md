@@ -37,8 +37,7 @@ captions over 32 PowerPoint decks in three graduate engineering courses.
 - Does not write the OOXML `descr` alt-text field (the WCAG-canonical,
   screen-reader-consumed attribute). Captioner produces a visible
   pedagogical-clarity layer; pair it with a full alt-text remediation
-  workflow for WCAG 2.1 AA conformance. A `--descr` extension is on the
-  roadmap (see README).
+  workflow for WCAG 2.1 AA conformance.
 - `.ppt` legacy format is not supported (python-pptx handles `.pptx` only).
 
 [0.1.0]: https://github.com/jbenhart44/captioner/releases/tag/v0.1.0

@@ -101,12 +101,6 @@ The full workflow (extract → read → caption → dry-run audit → apply → 
 
 1,132 captions across 32 PowerPoint decks in three graduate engineering courses (Summer 2026). Source decks preserved unmodified; every run produces a reproducible per-deck audit CSV.
 
-## Roadmap
-
-- **`--descr` extension** — also write the visible caption text into the OOXML alt-text field, closing the WCAG 2.1 SC 1.1.1 gap in the same pass.
-- Per-subject context tuning, caption styling presets, alternative caption languages, chart-value summarization, image-category opt-in/out lists, batch summaries.
-- **PyPI distribution (v0.2.x)** — would require migrating off the symlink-install pathway and supplying a vision backend. This is a planned **breaking change**; v0.1.x remains skill-only.
-
 ## License
 
 MIT — see [`LICENSE`](LICENSE). Copyright (c) 2026 Jake Benhart.
