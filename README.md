@@ -17,6 +17,7 @@ Captioner is a **Claude Code skill**. The caption-generation step uses Claude Co
 ```bash
 git clone https://github.com/jbenhart44/captioner.git
 cd captioner
+git checkout v0.1.0
 pip install -r requirements.txt
 bash install.sh
 ```
