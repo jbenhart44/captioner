@@ -4,6 +4,17 @@ All notable changes to captioner are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.1] - 2026-05-15
+
+Documentation-only release. No code or behavior changes; captioning output
+is byte-identical to 0.1.0.
+
+### Changed
+- README and project landing page now describe only shipped capabilities.
+  The speculative "Roadmap" / "Extending captioner" sections (forward-looking
+  feature ideas, including a prospective `--descr` mode and PyPI packaging)
+  were removed so every documentation surface conveys one consistent message.
+
 ## [0.1.0] - 2026-05-14
 
 First public release. Built and hardened across a production run of 1,132
@@ -40,4 +51,5 @@ captions over 32 PowerPoint decks in three graduate engineering courses.
   workflow for WCAG 2.1 AA conformance.
 - `.ppt` legacy format is not supported (python-pptx handles `.pptx` only).
 
+[0.1.1]: https://github.com/jbenhart44/captioner/releases/tag/v0.1.1
 [0.1.0]: https://github.com/jbenhart44/captioner/releases/tag/v0.1.0

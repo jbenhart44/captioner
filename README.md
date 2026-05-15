@@ -17,7 +17,7 @@ Captioner is a **Claude Code skill**. The caption-generation step uses Claude Co
 ```bash
 git clone https://github.com/jbenhart44/captioner.git
 cd captioner
-git checkout v0.1.0
+git checkout v0.1.1
 pip install -r requirements.txt
 bash install.sh
 ```
@@ -28,7 +28,7 @@ Then restart Claude Code and run:
 /captioner <path-to-.pptx-or-folder>
 ```
 
-> Prefer a versioned archive? Download the [v0.1.0 release](https://github.com/jbenhart44/captioner/releases/tag/v0.1.0) tarball instead of cloning.
+> Prefer a versioned archive? Download the [v0.1.1 release](https://github.com/jbenhart44/captioner/releases/tag/v0.1.1) tarball instead of cloning.
 
 ## Quick start
 
@@ -112,7 +112,7 @@ MIT — see [`LICENSE`](LICENSE). Copyright (c) 2026 Jake Benhart.
   author  = {Benhart, Jake},
   title   = {Captioner: pedagogical-clarity captions for PowerPoint decks},
   year    = {2026},
-  version = {0.1.0},
+  version = {0.1.1},
   url     = {https://github.com/jbenhart44/captioner}
 }
 ```
