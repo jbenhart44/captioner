@@ -1,0 +1,17 @@
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.venv/
+venv/
+env/
+.DS_Store
+Thumbs.db
+*.log
+work/
+work-dir/
+tmp/
+captions.json
+manifest.json
+audit/
+.env*
