@@ -41,7 +41,7 @@ captioner pptx ooxml descr wcag smartart
 # --- url / citation fragments ---
 https http www html url urls inc llc ltd
 
-# --- triaged false-positives from the 2026-05-18 NCSU MEM run (domain terms,
+# --- triaged false-positives from a real production run (domain terms,
 #     product names, and proper nouns the generic dictionary flags wrongly) ---
 # finance (505)
 forma perpetuity annuity levered unlevered ebitda capex opex amortization

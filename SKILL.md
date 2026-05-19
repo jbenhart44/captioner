@@ -50,7 +50,7 @@ For each unique image:
 
 **Batch reads aggressively** — many Read calls in one tool message. 20-30 image reads per message is fine.
 
-**Context hygiene between decks** (added 2026-05-12): When processing multiple decks in a single session, drop image reads from working context after each deck is finished. Concretely: complete one deck's `captions.json` end-to-end (read images → write JSON → run `apply_captions.py` → verify), then move to the next deck WITHOUT carrying the prior deck's image reads forward. If you anticipate context pressure across 5+ decks, dispatch each deck (or small batch) to a background subagent instead of doing it inline — the subagent's image reads are scoped to its own context window. Rationale: each deck has 15-50 images at ~50-200KB each; accumulating reads across 10+ decks balloons main-conversation context and can trigger summarization mid-batch, losing your place. Symptom that indicates this rule was violated: the conversation gets compacted while a multi-deck batch is in flight.
+**Context hygiene between decks**: When processing multiple decks in a single session, drop image reads from working context after each deck is finished. Concretely: complete one deck's `captions.json` end-to-end (read images → write JSON → run `apply_captions.py` → verify), then move to the next deck WITHOUT carrying the prior deck's image reads forward. If you anticipate context pressure across 5+ decks, dispatch each deck (or small batch) to a background subagent instead of doing it inline — the subagent's image reads are scoped to its own context window. Rationale: each deck has 15-50 images at ~50-200KB each; accumulating reads across 10+ decks balloons main-conversation context and can trigger summarization mid-batch, losing your place. Symptom that indicates this rule was violated: the conversation gets compacted while a multi-deck batch is in flight.
 
 ### Step 4 — DRY RUN first (recommended)
 ```bash
@@ -142,7 +142,7 @@ Hard guarantees:
 - Modify the picture itself, slide master, or existing slide shapes (other than captioner-prior shapes via `--update-existing`).
 - Touch embedded charts (preserved on save; no caption added since they're not Pictures).
 
-## SmartArt handling (added 2026-05-12)
+## SmartArt handling
 
 PowerPoint SmartArt diagrams are NOT `MSO_SHAPE_TYPE.PICTURE` shapes — they are `graphicFrame` elements with a `drawingml/2006/diagram` URI. The captioner has explicit handling for them:
 

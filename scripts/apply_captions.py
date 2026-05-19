@@ -35,6 +35,14 @@ from pptx import Presentation
 from pptx.enum.shapes import MSO_SHAPE_TYPE
 from pptx.util import Emu, Pt
 from _oxml_pics import iter_slide_pics, resolve_blob, guess_ext
+from _geometry import (
+    slide_footer_top as _g_slide_footer_top,
+    slide_title_rect as _g_slide_title_rect,
+    slide_body_obstacle_bands as _g_body_bands,
+    _clear_all_obstacles, visible_coverage,
+    FOOTER_CLEARANCE_EMU, MIN_CAPTION_WIDTH_EMU, EMU_PER_CHAR_DEFAULT,
+    MIN_CAPTION_HEIGHT as _G_MIN_CAPTION_HEIGHT,
+)
 
 # Fix: pic enumeration switched to the strict
 # raw-OOXML slide-spTree `.//p:pic` walk (see _oxml_pics.py), matching
@@ -189,7 +197,7 @@ def resolve_ph_geometry(slide, ph_idx):
     """A picture content-placeholder's geometry is inherited from the layout/
     master; the <p:pic> itself often has NO <a:xfrm>. python-pptx resolves the
     inheritance, so match the slide placeholder by idx and read its effective
-    box. Returns (left, top, width, height) EMU or None. (A prior
+    box. Returns (left, top, width, height) EMU or None. (The 
     off-page-caption bug: placeholder pics fell back to (0, 50000).)"""
     try:
         for ph in slide.placeholders:
@@ -245,7 +253,7 @@ def slide_footer_top(slide, slide_h):
                 # A footer is in the BOTTOM band. A footer/date/slide-number
                 # placeholder parked at the TOP of a master (top < band) is
                 # NOT a bottom footer — ignore it, else the reserved band
-                # collapses to the slide top.
+                # collapses to the slide top ().
                 if top >= band and (is_foot or has_txt):
                     limit = min(limit, int(top))
             except Exception:
@@ -658,6 +666,16 @@ def apply_to_deck(deck_info, captions, captioned_dir, audit_dir, style, opts):
     sp_engine, sp_wl = opts.get('_sp'), opts.get('_wl', set())
 
     for s_idx, slide in enumerate(prs.slides, 1):
+        # v0.2.1: per-slide placement geometry (shared by SmartArt-icon and
+        # main caption paths). Must be defined BEFORE the SmartArt loop so
+        # icon captions inherit the same footer clearance + obstacle list.
+        footer_limit = _g_slide_footer_top(slide, slide_h)
+        effective_footer_limit = footer_limit - FOOTER_CLEARANCE_EMU
+        title_rect = _g_slide_title_rect(slide)
+        body_bands = _g_body_bands(slide)
+        # Per-slide accumulator for Fix-E (caption-caption overlap avoidance).
+        # MUST reset here, at the top of each slide loop — not before, not inside pic loop.
+        placed_caps: list[tuple[int, int, int, int]] = []
         if opts['spellcheck'] or opts['dateqc']:
             for body_text in iter_slide_body_text(slide.shapes):
                 if opts['spellcheck']:
@@ -683,13 +701,32 @@ def apply_to_deck(deck_info, captions, captioned_dir, audit_dir, style, opts):
                     icon_h = 200000  # ~0.22"
                     icon_gap = 20000  # tiny gap below icon
                     for ic_idx, p in enumerate(placements):
-                        ic_top = p['y'] + p['cy'] + icon_gap
-                        if ic_top + icon_h > slide_h:
-                            ic_top = max(0, p['y'] - icon_gap - icon_h)
-                        ic_left = p['x']
-                        ic_width = p['cx']
-                        if ic_width < 400000:
-                            ic_width = 400000
+                        # v0.2.2: apply Fix-B (footer clearance) + Fix-D (widening)
+                        # to the SmartArt-icon caption path so it inherits the same
+                        # placement-quality guarantees as the main caption path.
+                        # Try below the icon first; if that would intrude the footer
+                        # clearance band, try above; clamp on-slide as last resort.
+                        below_ic_top = p['y'] + p['cy'] + icon_gap
+                        above_ic_top = max(0, p['y'] - icon_gap - icon_h)
+                        if below_ic_top + icon_h <= effective_footer_limit:
+                            ic_top = below_ic_top
+                        elif above_ic_top + icon_h <= p['y']:  # fits above icon
+                            ic_top = above_ic_top
+                        else:
+                            ic_top = max(0, effective_footer_limit - icon_h)
+                        # Fix-D: widen narrow icon-caption boxes to fit the label
+                        # text in ≤2 lines. Icons are typically <0.5" wide.
+                        name_text = p['name'] or ''
+                        ic_width = p['cx'] if p['cx'] >= 400000 else 400000
+                        chars_per_line = max(6, ic_width // EMU_PER_CHAR_DEFAULT)
+                        if name_text and len(name_text) > 2 * chars_per_line:
+                            needed = max(MIN_CAPTION_WIDTH_EMU // 2,
+                                         (len(name_text) // 2 + 1) * EMU_PER_CHAR_DEFAULT)
+                            ic_width = min(slide_w - p['x'], needed)
+                        ic_left = max(0, min(p['x'], slide_w - ic_width))
+                        # Track this icon caption as an obstacle for subsequent
+                        # main-caption placements on the same slide.
+                        placed_caps.append((ic_left, ic_top, ic_width, icon_h))
                         itb = slide.shapes.add_textbox(ic_left, ic_top, ic_width, icon_h)
                         try:
                             itb._element.nvSpPr.cNvPr.set('name', f"{SMARTART_ICON_SHAPE_NAME_PREFIX}{sa_idx}_{ic_idx}")
@@ -729,8 +766,7 @@ def apply_to_deck(deck_info, captions, captioned_dir, audit_dir, style, opts):
                         'action': 'skipped-smartart-text-only',
                     })
 
-        footer_limit = slide_footer_top(slide, slide_h)
-        title_box = slide_title_box(slide)
+        # (per-slide geometry init moved above the SmartArt loop)
         for pic in iter_slide_pics(slide):
             depth = pic['depth']
             pic_id = pic['pic_id']
@@ -790,7 +826,7 @@ def apply_to_deck(deck_info, captions, captioned_dir, audit_dir, style, opts):
             p_height = pic['ext_cy']
             # Placeholder-hosted picture: geometry inherited from the layout.
             # Resolve it via the python-pptx placeholder, else the caption
-            # lands off-page at (0, 50000).
+            # lands off-page at (0, 50000) ().
             if (None in (p_left, p_top, p_width, p_height)
                     and pic.get('is_placeholder') and pic.get('ph_idx') is not None):
                 g = resolve_ph_geometry(slide, pic['ph_idx'])
@@ -806,39 +842,127 @@ def apply_to_deck(deck_info, captions, captioned_dir, audit_dir, style, opts):
 
             gap = opts['gap_emu']
             c_height = opts['height_emu']
+            # Fix-D: width determination. Default = picture width, but widen if
+            # the caption text wouldn't fit in 2 lines at the picture's width.
+            # Never truncate text — widen the box up to slide_w - c_left.
             c_left = max(0, min(p_left, slide_w - 500000))
-            c_width = min(p_width, slide_w - c_left)
-            if c_width < 500000:
-                c_width = min(500000, slide_w)
+            base_width = min(p_width, slide_w - c_left)
+            if base_width < 500000:
+                base_width = min(500000, slide_w)
+            # Estimate width needed so the caption fits on ≤2 lines.
+            est_chars_per_line_at_base = max(10, base_width // EMU_PER_CHAR_DEFAULT)
+            widening_required = (len(caption) > 2 * est_chars_per_line_at_base)
+            if widening_required:
+                # Compute width that holds full caption in ≤2 lines, capped at slide width.
+                needed = max(MIN_CAPTION_WIDTH_EMU,
+                             (len(caption) // 2 + 1) * EMU_PER_CHAR_DEFAULT)
+                c_width = min(slide_w - c_left, needed)
+            else:
+                c_width = base_width
             if c_left + c_width > slide_w:
                 c_left = max(0, slide_w - c_width)
+            overflow_after_widening = (
+                len(caption) > 2 * max(10, c_width // EMU_PER_CHAR_DEFAULT))
 
-            # Preferred: directly below the picture, but never into the
-            # reserved bottom/footer band.
+            # Fix-B: ALL FOUR uses of footer_limit go through effective_footer_limit.
+            # See the placement audit — the v1 plan's 3-of-4 substitution
+            # caused forced_top to push the caption UP into the picture body.
             below_top = p_top + p_height + gap
             above_top = p_top - gap - c_height
-            below_ok = below_top + MIN_CAPTION_HEIGHT <= footer_limit
-            below_h = min(c_height, footer_limit - below_top) if below_ok else 0
+            below_ok = below_top + MIN_CAPTION_HEIGHT <= effective_footer_limit
+            below_h  = min(c_height, effective_footer_limit - below_top) if below_ok else 0
             forced_h = max(MIN_CAPTION_HEIGHT,
-                           min(c_height, footer_limit - p_top - p_height - gap))
-            forced_top = max(0, footer_limit - forced_h)
-            # Candidate slots in preference order; first that CLEARS the title
-            # (wherever it sits) wins. If none clear it, fall back to the first
-            # geometrically valid slot (title overlap then truly unavoidable —
-            # the picture itself occupies the rest of the slide).
+                           min(c_height,
+                               effective_footer_limit - p_top - p_height - gap))
+            forced_top = max(0, effective_footer_limit - forced_h)
+
+            # Fix-C: deterministic no-clean-slot detection (replaces area-ratio).
+            # The picture leaves no clean slot above OR in the clean-below band
+            # → caption would be forced inside the picture body. SKIP placement
+            # and surface for human review via overlay-fullbleed audit row.
+            no_slot = (not below_ok) and (above_top < 0)
+            if no_slot:
+                cov = visible_coverage(p_left, p_top, p_width, p_height,
+                                       slide_w, slide_h)
+                audit_rows.append({
+                    'slide': s_idx, 'pic_id': pic_id, 'image_hash': h,
+                    'caption': caption, 'char_len': len(caption),
+                    'in_group_depth': depth,
+                    'action': f'{"dry-run-would-" if opts["dry_run"] else ""}'
+                              f'overlay-fullbleed',
+                    'visible_coverage': round(cov, 3),
+                })
+                continue  # skip placement — no caption added to slide
+
+            # Build candidates in preference order.
             cands = []
             if below_ok:
                 cands.append(('added', below_top, below_h))
             if above_top >= 0:
                 cands.append(('fallback-above', above_top, c_height))
             cands.append(('fallback-bottom', forced_top, forced_h))
+
+            # Fix-A + Fix-E merge: a single obstacle list. Caption must clear
+            # title + body/subtitle text shapes + previously-placed captions.
+            obstacles = []
+            if title_rect is not None:
+                obstacles.append(title_rect)
+            obstacles.extend(body_bands)
+            obstacles.extend(placed_caps)  # vertical-only via _clear_all_obstacles
+
             pick = next((c for c in cands
-                         if not _voverlap(c[1], c[2], title_box)), cands[0])
+                         if _clear_all_obstacles(c[1], c[2], obstacles)),
+                        None)
+            if pick is None:
+                # Fix-E: no candidate clears every obstacle. Try a horizontal
+                # nudge — sometimes the only conflict is with a previously
+                # placed caption on the same slide.
+                nudged = False
+                for c in cands:
+                    # Try shifting c_left right by c_width + gap; if that fits
+                    # on-slide and clears prior captions vertically, use it.
+                    alt_left = c_left + c_width + gap
+                    if alt_left + c_width <= slide_w:
+                        # Re-test only against placed_caps (title/body don't
+                        # care about horizontal — vertical-only check):
+                        if _clear_all_obstacles(c[1], c[2], placed_caps):
+                            c_left = alt_left
+                            pick = c
+                            nudged = True
+                            break
+                if pick is None:
+                    # Truly no slot. SKIP placement (NEVER silent cands[0]).
+                    audit_rows.append({
+                        'slide': s_idx, 'pic_id': pic_id, 'image_hash': h,
+                        'caption': caption, 'char_len': len(caption),
+                        'in_group_depth': depth,
+                        'action': f'{"dry-run-would-" if opts["dry_run"] else ""}'
+                                  f'flagged-no-slot',
+                    })
+                    continue
             action, c_top, c_height = pick
-            # Final hard clamp — guarantee fully on-slide, never negative.
+
+            # Emit OVERFLOW-RISK row if the caption still won't fit on ≤2 lines
+            # even after widening (informational; caption is still placed).
+            if overflow_after_widening:
+                audit_rows.append({
+                    'slide': s_idx, 'pic_id': pic_id, 'image_hash': h,
+                    'caption': caption, 'char_len': len(caption),
+                    'in_group_depth': depth,
+                    'action': 'overflow-risk-noted',
+                })
+
+            # Final hard clamp — fully on-slide, never negative or past footer.
             c_top = max(0, min(c_top, slide_h - MIN_CAPTION_HEIGHT))
             if c_top + c_height > slide_h:
                 c_height = max(MIN_CAPTION_HEIGHT, slide_h - c_top)
+            if c_top + c_height > effective_footer_limit:
+                c_height = max(MIN_CAPTION_HEIGHT,
+                               effective_footer_limit - c_top)
+
+            # Fix-E: register this caption as an obstacle for subsequent pics
+            # on the SAME slide. Must happen for both dry-run and real apply.
+            placed_caps.append((c_left, c_top, c_width, c_height))
 
             if opts['dry_run']:
                 audit_rows.append({
@@ -889,11 +1013,19 @@ def apply_to_deck(deck_info, captions, captioned_dir, audit_dir, style, opts):
         prs.save(dst)
     if audit_rows:
         # Dry-run writes its OWN file so it can never clobber a prior real
-        # apply audit.
+        # apply audit ().
         audit_name = f"{deck}_audit_dryrun.csv" if opts['dry_run'] else f"{deck}_audit.csv"
         csv_path = os.path.join(audit_dir, audit_name)
+        # v0.2.1: union of keys across all rows — different audit-row types
+        # (overlay-fullbleed, flagged-no-slot, etc.) carry additional fields.
+        all_keys = []
+        seen_keys = set()
+        for r in audit_rows:
+            for k in r.keys():
+                if k not in seen_keys:
+                    seen_keys.add(k); all_keys.append(k)
         with open(csv_path, 'w', newline='') as f:
-            w = csv.DictWriter(f, fieldnames=audit_rows[0].keys())
+            w = csv.DictWriter(f, fieldnames=all_keys, extrasaction='ignore')
             w.writeheader()
             for r in audit_rows:
                 w.writerow(r)
@@ -976,7 +1108,7 @@ def main():
     }
     sp_engine, sp_wl, sp_status = init_spellcheck(do_spell)
     # FAIL LOUD: spell-check is default-on; a missing optional dep must NOT
-    # silently no-op. Captioning still
+    # silently no-op (). Captioning still
     # proceeds, but we banner it, drop a marker, and exit non-zero.
     spellcheck_degraded = do_spell and sp_status == 'unavailable'
     opts = {

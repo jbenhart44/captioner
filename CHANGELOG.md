@@ -4,6 +4,34 @@ All notable changes to captioner are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.1] - 2026-05-19
+
+Placement-quality release. Five real-deck failure patterns surfaced by user review of v0.2.0 output are now prevented in placement and surfaced explicitly in the audit. SmartArt-icon caption placement inherits the same guarantees as the main caption path.
+
+### Fixed
+
+- **Body / subtitle overlap (Pattern A)** — caption placement now considers BODY, SUBTITLE, CONTENT, OBJECT placeholders with visible text as obstacles, not just TITLE/CENTER_TITLE. The Fix-A obstacle filter is unified with the title check via `_clear_all_obstacles(c_top, c_h, obstacles)` so future obstacle classes plug in cleanly.
+- **Footer abutment (Pattern B)** — new `FOOTER_CLEARANCE_EMU` constant (default 91 440 EMU ≈ 0.10 in) reserves a visible gap between the caption bottom and the master/layout footer band. Configurable via the new `--footer-clearance-emu` CLI flag. The constant is applied to all four uses of `footer_limit` in the placement block (the v0.2.0 patch missed one site, which caused caption-top regression on full-bleed pictures).
+- **Full-bleed picture overlay (Pattern C)** — replaces the area-ratio heuristic with deterministic no-clean-slot detection: if the picture leaves no room above OR in the clean-below band, the caption is **skipped** and a `overlay-fullbleed` audit row is emitted with the picture's slide-clamped visible-coverage for human review. No magic threshold; no silent overlay on the picture body.
+- **Caption text overflow on narrow pictures (Pattern D)** — caption box now widens (up to slide width) to fit the caption text in ≤2 lines. Never truncates the caption (truncation would diverge the displayed text from the accessibility metadata). Widening events surface as informational audit rows.
+- **Caption–caption overlap on multi-picture slides (Pattern E)** — placement tracks previously placed captions on the same slide and rejects candidate positions that would collide. When no clean slot exists, the second caption is **skipped** with an explicit `flagged-no-slot` audit row (never a silent fallback). Includes a horizontal-nudge attempt when only a single nearby caption is in the way.
+- **SmartArt-icon caption parity** — the per-icon placement path now inherits Fix-B footer clearance + Fix-D widening + caption-caption obstacle registration, so SmartArt icon captions no longer abut the footer or overflow narrow boxes.
+
+### Added
+
+- `scripts/_geometry.py` — shared geometry helpers (`slide_footer_top`, `slide_title_rect`, `slide_body_obstacle_bands`, `_clear_all_obstacles`, `visible_coverage`, `FOOTER_CLEARANCE_EMU`, `MIN_CAPTION_HEIGHT`, `MIN_CAPTION_WIDTH_EMU`, `EMU_PER_CHAR_DEFAULT`) so apply / verify (and an external auditor, if you have one) agree on band thresholds and clearance constants.
+- `verify.py` extended with Pattern B (footer-abutment) and Pattern C (caption-inside-picture) coordinate checks. Audit rows with `action='overlay-fullbleed'` or `flagged-no-slot` are treated as known-skipped (intentionally no caption placed), not text-mismatch failures.
+
+### Changed
+
+- The audit-row CSV writer now unions the field names across all rows (not just the first), so issue-specific columns (e.g. `visible_coverage` on `overlay-fullbleed` rows) round-trip cleanly.
+- `--height-emu` is now an *advisory* initial height; Fix-D may widen the box and `MSO_AUTO_SIZE.SHAPE_TO_FIT_TEXT` grows it vertically as needed.
+
+### Known limits
+
+- The `EMU_PER_CHAR_DEFAULT = 114 000` heuristic for caption-text overflow detection is conservative for 10 pt italic Calibri but unvalidated across other fonts. Override via `--chars-per-emu` if your captions use a wider face. Long unbreakable tokens (URLs, compound proper nouns) can still overflow even with widening.
+- Vertical-only obstacle checking is the v0.2.1 contract — a narrow centered subtitle plus a right-side caption may trigger false-positive avoidance. 2D box-intersection is on the roadmap for a future release.
+
 ## [0.2.0] - 2026-05-19
 
 Correctness + QC release. Caption output for decks **without** placeholder-
@@ -90,6 +118,7 @@ captions over 32 PowerPoint decks in three graduate engineering courses.
   workflow for WCAG 2.1 AA conformance.
 - `.ppt` legacy format is not supported (python-pptx handles `.pptx` only).
 
+[0.2.1]: https://github.com/jbenhart44/captioner/releases/tag/v0.2.1
 [0.2.0]: https://github.com/jbenhart44/captioner/releases/tag/v0.2.0
 [0.1.1]: https://github.com/jbenhart44/captioner/releases/tag/v0.1.1
 [0.1.0]: https://github.com/jbenhart44/captioner/releases/tag/v0.1.0
