@@ -1,3 +1,4 @@
 python-pptx>=0.6.21
 lxml>=4.9.0
 Pillow>=9.0.0
+pyspellchecker>=0.7.0  # default-on spell/QC pass; pass --quick/--no-spellcheck to skip

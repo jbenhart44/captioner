@@ -19,7 +19,7 @@ Produces:
   <work_dir>/captioned_decks/<deck>_captioned.pptx
   <work_dir>/audit/<deck>_audit.csv
 
-Improvements (from an independent external code review):
+Improvements (from Gemini review v1/v2):
   - --dry-run: emits audit CSV but does NOT modify any .pptx
   - --font-name / --font-size / --font-color / --italic: caption styling
   - --gap-emu / --height-emu: layout offsets
@@ -34,6 +34,14 @@ import sys, os, json, shutil, csv, hashlib, argparse, re
 from pptx import Presentation
 from pptx.enum.shapes import MSO_SHAPE_TYPE
 from pptx.util import Emu, Pt
+from _oxml_pics import iter_slide_pics, resolve_blob, guess_ext
+
+# Fix: pic enumeration switched to the strict
+# raw-OOXML slide-spTree `.//p:pic` walk (see _oxml_pics.py), matching
+# extract/verify exactly. Placement geometry reads the pic's own
+# <a:off>/<a:ext> EMU; verified byte-identical to the old pic.left/.top/
+# .width/.height for every deck pic in this corpus (incl. group-nested),
+# so caption-card positions do not move. Hashes unchanged.
 from pptx.dml.color import RGBColor
 from pptx.enum.text import PP_ALIGN, MSO_AUTO_SIZE
 
@@ -45,6 +53,274 @@ MIN_CAPTION_HEIGHT = 250000
 NS_A = '{http://schemas.openxmlformats.org/drawingml/2006/main}'
 NS_DGM_REL = '{http://schemas.openxmlformats.org/drawingml/2006/diagram}'
 DIAGRAM_DATA_URI = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships/diagramData'
+
+# ---------------------------------------------------------------------------
+# Spell-check (opt-in, --spellcheck). FLAG-ONLY: this never edits the .pptx and
+# never auto-corrects a word. It emits suspected misspellings to a separate
+# <deck>_spellcheck.csv for a human to review. A bundled, user-extensible
+# whitelist (spellcheck_whitelist.txt) prevents flagging known domain terms,
+# abbreviations, and proper nouns — so captioner does not "fix" non-issues.
+# ---------------------------------------------------------------------------
+WHITELIST_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'spellcheck_whitelist.txt')
+# Proper-noun typos a generic dictionary won't suggest well — surfaced explicitly.
+# Names here are web-verified canonical spellings (see SKILL.md "Name verification").
+SPELL_KNOWN_BAD = {
+    'humaoid': 'humanoid', 'humaoids': 'humanoids',
+    'appronik': 'Apptronik',          # Apptronik (humanoid-robotics co.) — web-verified
+    'geoffery': 'Geoffrey',           # Geoffrey Moore (Crossing the Chasm) — web-verified
+    'clayten': 'Clayton',             # Clayton Christensen (HBS) — web-verified
+    'siemans': 'Siemens',             # Siemens — web-verified
+    'wolfrom': 'Wolfram',             # Wolfram Research — web-verified
+}
+
+
+def _load_whitelist():
+    wl = set()
+    try:
+        with open(WHITELIST_PATH, encoding='utf-8') as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith('#'):
+                    continue
+                for tok in line.split():
+                    wl.add(tok.lower())
+    except OSError:
+        pass
+    return wl
+
+
+def init_spellcheck(enabled):
+    """Return (SpellChecker|None, whitelist set, status str). Degrades gracefully
+    if pyspellchecker is not installed (feature is optional)."""
+    if not enabled:
+        return None, set(), 'disabled'
+    wl = _load_whitelist()
+    try:
+        from spellchecker import SpellChecker
+    except ImportError:
+        return None, wl, 'unavailable'  # documented optional dependency
+    return SpellChecker(distance=1), wl, 'ready'
+
+
+def spell_scan(text, source, s_idx, sp, wl, seen, rows):
+    """Append suspected-misspelling rows for `text`. FLAG-ONLY — no mutation.
+    `source` is 'caption' or 'slide-text'. `seen` dedupes (source, slide, word)."""
+    if not text:
+        return
+    low_line = text.lower()
+    if 'http' in low_line or 'www.' in low_line or '://' in low_line \
+            or any(d in low_line for d in ('.com', '.org', '.ai', '.io',
+                                           '.gov', '.edu', '.net', '.co/')):
+        return  # URL / citation / product-domain line: not prose
+    for tok in re.findall(r"[A-Za-z][A-Za-z'\-]+", text):
+        low = tok.lower().strip("'-")
+        if low in SPELL_KNOWN_BAD:
+            sug, known = SPELL_KNOWN_BAD[low], True
+        else:
+            if len(low) < 4 or tok.isupper():
+                continue
+            if any(ch.isdigit() for ch in tok) or "'" in tok or '-' in tok:
+                continue
+            # Plural-of-acronym (NPVs, IRRs, CEOs, KPIs, MNCs, SVMs, CNNs, GPTs):
+            # the singular form is an all-caps acronym -> not a misspelling.
+            if low.endswith('s') and len(tok) >= 3 and tok[:-1].isupper():
+                continue
+            if low in wl or sp is None:
+                continue
+            if not sp.unknown([low]):
+                continue
+            sug = sp.correction(low)
+            if not sug or sug == low:
+                continue
+            known = False
+        # Likely proper noun (Capitalized, not all-caps) -> the agent must
+        # web-verify the canonical spelling before presenting it as a fix.
+        verify_name = bool(tok[:1].isupper() and not tok.isupper())
+        key = (source, s_idx, low)
+        if key in seen:
+            continue
+        seen.add(key)
+        rows.append({
+            'slide': s_idx, 'source': source, 'term': tok,
+            'suggestion': sug, 'known_bad': known,
+            'verify_name': verify_name,
+            'context': text.strip()[:110].replace('\n', ' '),
+        })
+
+
+_QC_PLACEHOLDER = ("click to add", "lorem ipsum", "[gap", "tbd", "xxx",
+                   "placeholder text", "insert text here", "your text here")
+_QC_DOUBLE = re.compile(r"\b(\w{3,})\s+\1\b", re.IGNORECASE)
+_QC_DATE = re.compile(r"\b(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)"
+                      r"[a-z]*\.?\s+\d{1,2}(?:,?\s*\d{4})?\b")
+
+
+def qc_scan(text, source, s_idx, seen, rows):
+    """READ-ONLY date / doubled-word / leftover-template scan. FLAG-ONLY — never
+    edits the .pptx. Generic (no course-specific year/code rules). `seen` dedupes.
+    Date strings are tagged 'date-review' (informational, not asserted wrong)."""
+    if not text:
+        return
+    low = text.lower()
+    for ph in _QC_PLACEHOLDER:
+        if ph in low:
+            k = ('placeholder', s_idx, ph)
+            if k not in seen:
+                seen.add(k)
+                rows.append({'slide': s_idx, 'source': source, 'kind': 'leftover-template',
+                             'detail': ph, 'context': text.strip()[:110].replace('\n', ' ')})
+    for m in set(w.lower() for w in _QC_DOUBLE.findall(text)):
+        if m in ('that', 'had', 'is', 'the'):  # common legitimate repeats
+            continue
+        k = ('double', s_idx, m)
+        if k not in seen:
+            seen.add(k)
+            rows.append({'slide': s_idx, 'source': source, 'kind': 'doubled-word',
+                         'detail': f"{m} {m}", 'context': text.strip()[:110].replace('\n', ' ')})
+    for m in _QC_DATE.findall(text):
+        k = ('date', s_idx, m.strip())
+        if k not in seen:
+            seen.add(k)
+            rows.append({'slide': s_idx, 'source': source, 'kind': 'date-review',
+                         'detail': m.strip(), 'context': text.strip()[:110].replace('\n', ' ')})
+
+
+def resolve_ph_geometry(slide, ph_idx):
+    """A picture content-placeholder's geometry is inherited from the layout/
+    master; the <p:pic> itself often has NO <a:xfrm>. python-pptx resolves the
+    inheritance, so match the slide placeholder by idx and read its effective
+    box. Returns (left, top, width, height) EMU or None. (A prior
+    off-page-caption bug: placeholder pics fell back to (0, 50000).)"""
+    try:
+        for ph in slide.placeholders:
+            pf = ph.placeholder_format
+            if pf is not None and pf.idx == ph_idx:
+                if None not in (ph.left, ph.top, ph.width, ph.height):
+                    return int(ph.left), int(ph.top), int(ph.width), int(ph.height)
+    except Exception:
+        pass
+    return None
+
+
+def slide_footer_top(slide, slide_h):
+    """Y (EMU) below which captions must NOT extend — the top of the reserved
+    bottom band. Considers FOOTER/DATE/SLIDE_NUMBER placeholders on the slide,
+    its layout, and master, plus any low-band text shape (catches branded
+    footers like a 'Pearson' credit). Always reserves at least the bottom
+    ~0.3in so captions never sit in the extreme bottom strip."""
+    from pptx.enum.shapes import PP_PLACEHOLDER
+    foot_types = {PP_PLACEHOLDER.FOOTER, PP_PLACEHOLDER.DATE,
+                  PP_PLACEHOLDER.SLIDE_NUMBER}
+    limit = slide_h - 274320  # ~0.30in universal bottom safety margin
+    band = int(slide_h * 0.86)  # "low band" = bottom ~14%
+    sources = [slide]
+    try:
+        sources.append(slide.slide_layout)
+        sources.append(slide.slide_layout.slide_master)
+    except Exception:
+        pass
+    for src in sources:
+        try:
+            shapes = list(src.placeholders) + [s for s in src.shapes
+                                               if s not in src.placeholders]
+        except Exception:
+            try:
+                shapes = list(src.shapes)
+            except Exception:
+                continue
+        for sh in shapes:
+            try:
+                top = sh.top
+                if top is None:
+                    continue
+                is_foot = False
+                try:
+                    pf = sh.placeholder_format
+                    if pf is not None and pf.type in foot_types:
+                        is_foot = True
+                except Exception:
+                    pass
+                has_txt = bool(getattr(sh, 'has_text_frame', False)
+                               and sh.text_frame.text.strip())
+                # A footer is in the BOTTOM band. A footer/date/slide-number
+                # placeholder parked at the TOP of a master (top < band) is
+                # NOT a bottom footer — ignore it, else the reserved band
+                # collapses to the slide top.
+                if top >= band and (is_foot or has_txt):
+                    limit = min(limit, int(top))
+            except Exception:
+                continue
+    return max(0, limit)
+
+
+def slide_title_box(slide):
+    """Bounding box (l, t, r, b) EMU enclosing every TITLE/CENTER_TITLE
+    placeholder that has visible text, wherever it sits on the slide (some
+    layouts park the title low, under an image). None if no titled text.
+    Captions must avoid this rect when a clear slot exists."""
+    from pptx.enum.shapes import PP_PLACEHOLDER
+    title_types = {PP_PLACEHOLDER.TITLE, PP_PLACEHOLDER.CENTER_TITLE}
+    L = T = R = B = None
+    for sh in slide.shapes:
+        if (sh.name or '').startswith('captioner_caption_'):
+            continue
+        try:
+            pf = sh.placeholder_format
+            if pf is None or pf.type not in title_types:
+                continue
+            if not (getattr(sh, 'has_text_frame', False)
+                    and sh.text_frame.text.strip()):
+                continue
+            if None in (sh.left, sh.top, sh.width, sh.height):
+                continue
+            l, t = int(sh.left), int(sh.top)
+            r, b = l + int(sh.width), t + int(sh.height)
+            L = l if L is None else min(L, l)
+            T = t if T is None else min(T, t)
+            R = r if R is None else max(R, r)
+            B = b if B is None else max(B, b)
+        except Exception:
+            continue
+    return None if L is None else (L, T, R, B)
+
+
+def _voverlap(c_top, c_h, title):
+    """True if a caption [c_top, c_top+c_h] vertically overlaps the title rect
+    by a meaningful amount (>15% of caption height)."""
+    if title is None:
+        return False
+    _, tT, _, tB = title
+    iy = max(0, min(c_top + c_h, tB) - max(c_top, tT))
+    return iy > 0.15 * c_h
+
+
+def iter_slide_body_text(shapes):
+    """Yield instructor-authored text (text frames + tables), recursing groups,
+    skipping captioner's own added shapes."""
+    for sh in shapes:
+        try:
+            name = sh.name or ''
+        except Exception:
+            name = ''
+        if name.startswith((CAPTION_SHAPE_NAME_PREFIX, SMARTART_SHAPE_NAME_PREFIX,
+                            SMARTART_ICON_SHAPE_NAME_PREFIX)):
+            continue
+        try:
+            if sh.shape_type == MSO_SHAPE_TYPE.GROUP:
+                yield from iter_slide_body_text(sh.shapes)
+                continue
+            if sh.has_table:
+                for row in sh.table.rows:
+                    for cell in row.cells:
+                        if cell.text.strip():
+                            yield cell.text
+                continue
+        except Exception:
+            pass
+        if getattr(sh, 'has_text_frame', False):
+            t = sh.text_frame.text
+            if t and t.strip():
+                yield t
 
 
 def iter_smartart_frames(slide):
@@ -375,8 +651,20 @@ def apply_to_deck(deck_info, captions, captioned_dir, audit_dir, style, opts):
     slide_h = prs.slide_height
     audit_rows = []
     n_caption_shapes_removed = 0
+    spell_rows = []
+    spell_seen = set()
+    qc_rows = []
+    qc_seen = set()
+    sp_engine, sp_wl = opts.get('_sp'), opts.get('_wl', set())
 
     for s_idx, slide in enumerate(prs.slides, 1):
+        if opts['spellcheck'] or opts['dateqc']:
+            for body_text in iter_slide_body_text(slide.shapes):
+                if opts['spellcheck']:
+                    spell_scan(body_text, 'slide-text', s_idx, sp_engine, sp_wl,
+                               spell_seen, spell_rows)
+                if opts['dateqc']:
+                    qc_scan(body_text, 'slide-text', s_idx, qc_seen, qc_rows)
         # Idempotency: if --update-existing AND not dry-run, strip any prior captioner shapes
         # on this slide before adding new ones.
         if opts['update_existing'] and not opts['dry_run']:
@@ -441,13 +729,27 @@ def apply_to_deck(deck_info, captions, captioned_dir, audit_dir, style, opts):
                         'action': 'skipped-smartart-text-only',
                     })
 
-        for pic, depth in iter_pictures_recursive(slide.shapes):
+        footer_limit = slide_footer_top(slide, slide_h)
+        title_box = slide_title_box(slide)
+        for pic in iter_slide_pics(slide):
+            depth = pic['depth']
+            pic_id = pic['pic_id']
+            if pic['rid'] is None:
+                # Linked/external pic (r:link, no r:embed) or malformed blip:
+                # cannot hash bytes -> skip + structured audit row (parity
+                # with extract_images.py, which also skips + logs these).
+                audit_rows.append({
+                    'slide': s_idx, 'pic_id': pic_id, 'image_hash': '',
+                    'caption': '', 'char_len': 0, 'in_group_depth': depth,
+                    'action': 'skipped-linked-no-embed',
+                })
+                continue
             try:
-                blob = pic.image.blob
-                ext = pic.image.ext
+                blob = resolve_blob(slide, pic['rid'])
+                ext = guess_ext(slide.part.related_part(pic['rid']))
             except Exception:
                 audit_rows.append({
-                    'slide': s_idx, 'pic_id': '', 'image_hash': '',
+                    'slide': s_idx, 'pic_id': pic_id, 'image_hash': '',
                     'caption': '', 'char_len': 0, 'in_group_depth': depth,
                     'action': 'skipped-image-extract-failed',
                 })
@@ -455,10 +757,6 @@ def apply_to_deck(deck_info, captions, captioned_dir, audit_dir, style, opts):
             h = hashlib.sha256(blob).hexdigest()[:12]
             key = f"{deck}/{h}.{ext}"
             caption = captions.get(key)
-            try:
-                pic_id = pic._element.nvPicPr.cNvPr.get('id') or ''
-            except Exception:
-                pic_id = ''
 
             if caption is None:
                 audit_rows.append({
@@ -475,26 +773,72 @@ def apply_to_deck(deck_info, captions, captioned_dir, audit_dir, style, opts):
                 })
                 continue
 
-            # Compute placement
-            p_left, p_top = pic.left, pic.top
-            p_width, p_height = pic.width, pic.height
-            c_left = p_left
-            c_width = min(p_width, slide_w - p_left)
-            if c_width < 500000:
-                c_width = 500000
-            c_top = p_top + p_height + opts['gap_emu']
-            c_height = opts['height_emu']
-            action = 'added'
+            if opts['spellcheck']:
+                spell_scan(caption, 'caption', s_idx, sp_engine, sp_wl,
+                           spell_seen, spell_rows)
+            if opts['dateqc']:
+                qc_scan(caption, 'caption', s_idx, qc_seen, qc_rows)
 
-            if c_top + MIN_CAPTION_HEIGHT > slide_h:
-                c_top = p_top - opts['gap_emu'] - opts['height_emu']
-                action = 'fallback-above'
-                if c_top < 0:
-                    c_height = max(MIN_CAPTION_HEIGHT, slide_h - p_top - p_height - opts['gap_emu'])
-                    if c_height < MIN_CAPTION_HEIGHT:
-                        c_height = MIN_CAPTION_HEIGHT
-                    c_top = max(0, slide_h - c_height - opts['gap_emu'])
-                    action = 'fallback-bottom'
+            # Compute placement. Raw <a:off>/<a:ext> EMU — proven byte-identical
+            # to the old python-pptx pic.left/.top/.width/.height for every deck
+            # pic in this corpus (incl. group-nested), so caption cards do not
+            # move. Defensive 0 default if a pic somehow lacks an xfrm (the
+            # off-slide fallback-placement logic below then handles it).
+            p_left = pic['off_x']
+            p_top = pic['off_y']
+            p_width = pic['ext_cx']
+            p_height = pic['ext_cy']
+            # Placeholder-hosted picture: geometry inherited from the layout.
+            # Resolve it via the python-pptx placeholder, else the caption
+            # lands off-page at (0, 50000).
+            if (None in (p_left, p_top, p_width, p_height)
+                    and pic.get('is_placeholder') and pic.get('ph_idx') is not None):
+                g = resolve_ph_geometry(slide, pic['ph_idx'])
+                if g is not None:
+                    p_left, p_top, p_width, p_height = g
+            # Last-resort: center a default box on the slide rather than the
+            # old degenerate top-left stub.
+            if None in (p_left, p_top, p_width, p_height):
+                p_width = p_width or min(4000000, slide_w)
+                p_height = p_height or 0
+                p_left = p_left if p_left is not None else (slide_w - p_width) // 2
+                p_top = p_top if p_top is not None else int(slide_h * 0.55)
+
+            gap = opts['gap_emu']
+            c_height = opts['height_emu']
+            c_left = max(0, min(p_left, slide_w - 500000))
+            c_width = min(p_width, slide_w - c_left)
+            if c_width < 500000:
+                c_width = min(500000, slide_w)
+            if c_left + c_width > slide_w:
+                c_left = max(0, slide_w - c_width)
+
+            # Preferred: directly below the picture, but never into the
+            # reserved bottom/footer band.
+            below_top = p_top + p_height + gap
+            above_top = p_top - gap - c_height
+            below_ok = below_top + MIN_CAPTION_HEIGHT <= footer_limit
+            below_h = min(c_height, footer_limit - below_top) if below_ok else 0
+            forced_h = max(MIN_CAPTION_HEIGHT,
+                           min(c_height, footer_limit - p_top - p_height - gap))
+            forced_top = max(0, footer_limit - forced_h)
+            # Candidate slots in preference order; first that CLEARS the title
+            # (wherever it sits) wins. If none clear it, fall back to the first
+            # geometrically valid slot (title overlap then truly unavoidable —
+            # the picture itself occupies the rest of the slide).
+            cands = []
+            if below_ok:
+                cands.append(('added', below_top, below_h))
+            if above_top >= 0:
+                cands.append(('fallback-above', above_top, c_height))
+            cands.append(('fallback-bottom', forced_top, forced_h))
+            pick = next((c for c in cands
+                         if not _voverlap(c[1], c[2], title_box)), cands[0])
+            action, c_top, c_height = pick
+            # Final hard clamp — guarantee fully on-slide, never negative.
+            c_top = max(0, min(c_top, slide_h - MIN_CAPTION_HEIGHT))
+            if c_top + c_height > slide_h:
+                c_height = max(MIN_CAPTION_HEIGHT, slide_h - c_top)
 
             if opts['dry_run']:
                 audit_rows.append({
@@ -544,16 +888,40 @@ def apply_to_deck(deck_info, captions, captioned_dir, audit_dir, style, opts):
     if not opts['dry_run']:
         prs.save(dst)
     if audit_rows:
-        csv_path = os.path.join(audit_dir, f"{deck}_audit.csv")
+        # Dry-run writes its OWN file so it can never clobber a prior real
+        # apply audit.
+        audit_name = f"{deck}_audit_dryrun.csv" if opts['dry_run'] else f"{deck}_audit.csv"
+        csv_path = os.path.join(audit_dir, audit_name)
         with open(csv_path, 'w', newline='') as f:
             w = csv.DictWriter(f, fieldnames=audit_rows[0].keys())
             w.writeheader()
             for r in audit_rows:
                 w.writerow(r)
 
+    # QC artifacts go to their OWN directory, never the caption audit dir.
+    qc_dir = opts['qc_dir']
+    if opts['spellcheck'] and spell_rows:
+        sc_path = os.path.join(qc_dir, f"{deck}_spellcheck.csv")
+        with open(sc_path, 'w', newline='') as f:
+            w = csv.DictWriter(f, fieldnames=['slide', 'source', 'term',
+                                              'suggestion', 'known_bad',
+                                              'verify_name', 'context'])
+            w.writeheader()
+            for r in spell_rows:
+                w.writerow(r)
+    if opts['dateqc'] and qc_rows:
+        qp = os.path.join(qc_dir, f"{deck}_qc.csv")
+        with open(qp, 'w', newline='') as f:
+            w = csv.DictWriter(f, fieldnames=['slide', 'source', 'kind',
+                                              'detail', 'context'])
+            w.writeheader()
+            for r in qc_rows:
+                w.writerow(r)
+
     return {
         'deck': deck, 'dst': dst if not opts['dry_run'] else None,
         'rows': audit_rows, 'n_caption_shapes_removed': n_caption_shapes_removed,
+        'spell_rows': spell_rows, 'qc_rows': qc_rows,
     }
 
 
@@ -572,7 +940,16 @@ def main():
     ap.add_argument('--update-existing', action='store_true', help='Detect and remove previously-added captioner shapes before adding new ones (else re-runs DUPLICATE)')
     ap.add_argument('--no-smartart', action='store_true', help='Disable SmartArt captioning (SmartArt captions are auto-generated from diagram text content, on by default)')
     ap.add_argument('--quiet', action='store_true', help='Suppress per-deck progress lines')
+    # QC is ON BY DEFAULT (spell-check + name-verify tagging + date/template QC).
+    ap.add_argument('--quick', action='store_true', help='Captioning ONLY — skip ALL QC (spell-check + date/template scan). Use when you explicitly do not want QC.')
+    ap.add_argument('--no-spellcheck', action='store_true', help='Disable just the spell-check pass (date/template QC still runs unless --quick).')
+    ap.add_argument('--no-dateqc', action='store_true', help='Disable just the date/doubled-word/leftover-template scan (spell-check still runs unless --quick).')
+    ap.add_argument('--spellcheck', action='store_true', help=argparse.SUPPRESS)  # back-compat no-op: spell-check is now default-on
     args = ap.parse_args()
+    # Default-on QC with granular + master (--quick) toggles.
+    qc_on = not args.quick
+    do_spell = qc_on and not args.no_spellcheck
+    do_dateqc = qc_on and not args.no_dateqc
 
     work = os.path.abspath(args.work_dir)
     with open(os.path.join(work, 'manifest.json')) as f:
@@ -586,24 +963,60 @@ def main():
 
     captioned_dir = os.path.join(work, 'captioned_decks')
     audit_dir = os.path.join(work, 'audit')
+    qc_dir = os.path.join(work, 'qc')
     os.makedirs(captioned_dir, exist_ok=True)
     os.makedirs(audit_dir, exist_ok=True)
+    if do_spell or do_dateqc:
+        os.makedirs(qc_dir, exist_ok=True)
 
     style = {
         'font_name': args.font_name, 'font_size': args.font_size,
         'font_color': args.font_color, 'italic': args.italic,
         'bg_color': args.bg_color, 'border_color': args.border_color,
     }
+    sp_engine, sp_wl, sp_status = init_spellcheck(do_spell)
+    # FAIL LOUD: spell-check is default-on; a missing optional dep must NOT
+    # silently no-op. Captioning still
+    # proceeds, but we banner it, drop a marker, and exit non-zero.
+    spellcheck_degraded = do_spell and sp_status == 'unavailable'
     opts = {
         'dry_run': args.dry_run, 'update_existing': args.update_existing,
         'gap_emu': args.gap_emu, 'height_emu': args.height_emu,
         'caption_smartart': not args.no_smartart,
+        'spellcheck': do_spell and sp_status == 'ready',
+        'dateqc': do_dateqc, 'qc_dir': qc_dir,
+        '_sp': sp_engine, '_wl': sp_wl,
     }
 
     if args.dry_run:
         print("=== DRY RUN — no .pptx files will be modified ===")
+    if args.quick:
+        print("=== --quick: captioning ONLY, all QC skipped by request ===")
+    if spellcheck_degraded:
+        os.makedirs(qc_dir, exist_ok=True)
+        with open(os.path.join(qc_dir, 'SPELLCHECK_NOT_RUN.txt'), 'w') as mf:
+            mf.write("Spell-check is default-ON but pyspellchecker is NOT importable "
+                     "in the Python that ran apply_captions.py.\n"
+                     "Captions were applied; SPELL-CHECK DID NOT RUN.\n"
+                     "Fix: run via a Python with pyspellchecker installed, or pass "
+                     "--no-spellcheck / --quick to acknowledge skipping it.\n")
+        print("*" * 72)
+        print("*** ERROR: spell-check is ON by default but pyspellchecker is NOT")
+        print("*** installed in this Python. Captions WILL be applied, but the")
+        print("*** spell-check DID NOT RUN. Marker: qc/SPELLCHECK_NOT_RUN.txt")
+        print("*** Re-run with pyspellchecker available, or pass --no-spellcheck")
+        print("*** / --quick to explicitly proceed without it. (exit code 3)")
+        print("*" * 72)
+    elif opts['spellcheck']:
+        print(f"=== spell-check ON (default; FLAG-ONLY, whitelist={len(sp_wl)} "
+              "terms): captions + slide text scanned; qc/<deck>_spellcheck.csv "
+              "emitted; NO .pptx edited, NO auto-correction ===")
+    if opts['dateqc']:
+        print("=== date/template QC ON (default; FLAG-ONLY): "
+              "qc/<deck>_qc.csv emitted ===")
 
     total_added = total_skipped = total_pics = total_removed = total_errored = 0
+    total_spell = total_qc = total_verify = 0
     decks_with_errors = []
     for i, (deck_name, deck_info) in enumerate(manifest.items(), 1):
         if 'error' in deck_info:
@@ -630,17 +1043,38 @@ def main():
             print(f"[{i}/{len(manifest)}] {deck_name:<35} {added:>3}/{len(rows)} {verb}  {skipped:>3} skip{removed_note}  -> {dst_label}")
         total_added += added; total_skipped += skipped; total_pics += len(rows)
         total_removed += result['n_caption_shapes_removed']
+        sr = result.get('spell_rows', [])
+        total_spell += len(sr)
+        total_verify += sum(1 for r in sr if r.get('verify_name'))
+        total_qc += len(result.get('qc_rows', []))
 
     print(f"\n{'='*72}")
     print(f"TOTAL: {total_added}/{total_pics} captions {'would be added (dry-run)' if args.dry_run else 'added'}, {total_skipped} skipped, {total_errored} deck-level errors")
     if total_removed:
         print(f"Prior captioner shapes removed (idempotency): {total_removed}")
+    if opts['spellcheck']:
+        print(f"Spell-check flags (review only, no edits made): {total_spell} "
+              f"— see qc/<deck>_spellcheck.csv in {qc_dir}")
+        if total_verify:
+            print(f"  ↳ {total_verify} are likely PROPER NOUNS (verify_name=True): "
+                  "web-verify the canonical spelling BEFORE presenting as a fix "
+                  "(see SKILL.md “Name verification”).")
+    if opts['dateqc']:
+        print(f"Date/template QC flags (review only): {total_qc} "
+              f"— see qc/<deck>_qc.csv in {qc_dir}")
+    if spellcheck_degraded:
+        print("SPELL-CHECK DID NOT RUN — pyspellchecker missing "
+              "(qc/SPELLCHECK_NOT_RUN.txt). See banner above.")
     if decks_with_errors:
         print(f"Decks with errors: {decks_with_errors}")
     if not args.dry_run:
         print(f"Captioned decks: {captioned_dir}")
     print(f"Audit CSVs:      {audit_dir}")
+    if do_spell or do_dateqc:
+        print(f"QC CSVs:         {qc_dir}")
     print(f"{'='*72}")
+    if spellcheck_degraded:
+        sys.exit(3)
 
 
 if __name__ == '__main__':

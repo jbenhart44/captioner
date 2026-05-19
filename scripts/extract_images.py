@@ -1,13 +1,13 @@
 """Extract unique images from .pptx (or all .pptx in a folder) into a work dir.
 
 Usage:
-  python3 extract_images.py <input.pptx-or-folder> <work_dir> [--context "Lecture 3 — Module 5 overview"]
+  python3 extract_images.py <input.pptx-or-folder> <work_dir> [--context "Biology 101 Lecture 3"]
 
 Produces:
   <work_dir>/manifest.json
   <work_dir>/images/<deck_name>/<sha256-hash>.<ext>
 
-Features (hardened following an independent external code review):
+Features (improvements from Gemini review v1/v2):
   - Recursive traversal into GROUP shapes (catches nested pictures consultants love to group)
   - Skips hidden shapes (cNvPr hidden="1")
   - Per-image progress prints
@@ -18,37 +18,14 @@ Features (hardened following an independent external code review):
 import sys, os, json, hashlib, glob, argparse, traceback
 from pptx import Presentation
 from pptx.enum.shapes import MSO_SHAPE_TYPE
+from _oxml_pics import iter_slide_pics, resolve_blob, guess_ext, NS
 
-
-def iter_pictures_recursive(shapes, depth=0):
-    """Yield every Picture shape in a slide, recursing into GROUP shapes."""
-    for sh in shapes:
-        # Skip hidden shapes (cNvPr hidden="1")
-        try:
-            xml_el = sh._element
-            # Walk into nv*Pr / cNvPr to check hidden attribute
-            cNvPr = None
-            for tag_suffix in ('nvPicPr', 'nvSpPr', 'nvGrpSpPr', 'nvGraphicFramePr', 'nvCxnSpPr'):
-                nvpr = getattr(xml_el, tag_suffix, None)
-                if nvpr is not None:
-                    cNvPr = getattr(nvpr, 'cNvPr', None)
-                    break
-            if cNvPr is not None and cNvPr.get('hidden') == '1':
-                continue
-        except Exception:
-            pass  # If hidden-check fails, proceed (don't drop the shape silently)
-
-        if sh.shape_type == MSO_SHAPE_TYPE.PICTURE:
-            yield sh, depth
-        elif sh.shape_type == MSO_SHAPE_TYPE.GROUP:
-            try:
-                yield from iter_pictures_recursive(sh.shapes, depth + 1)
-            except NotImplementedError:
-                # python-pptx raises NotImplementedError on certain group geometries
-                # (e.g., SmartArt-derived groups). Skip + log silently — apply_captions will too.
-                continue
-            except Exception:
-                continue
+# NOTE (adversarial-review fix): picture enumeration moved off the
+# python-pptx `shape_type == PICTURE` walk and onto a strict raw-OOXML
+# slide-spTree `.//p:pic` enumeration (see _oxml_pics.py). The old walk typed
+# placeholder-hosted and OLE-fallback `<p:pic>` as PLACEHOLDER and silently
+# dropped them (505 ~12%, 507 88%, 534 97% coverage). Hashes stay byte-identical
+# (slide.part.related_part(rId).blob == old pic.image.blob, proven end-to-end).
 
 
 def extract_text_context(slide):
@@ -82,7 +59,7 @@ def process_deck(deck_path, images_root, deck_context=''):
     seen = {}
     pictures = []
     n_groups_seen = 0
-    n_hidden_skipped = 0  # implicit — would be counted if we tracked it
+    n_linked_skipped = 0  # <a:blip> with r:link but no r:embed (external pic)
 
     for s_idx, slide in enumerate(prs.slides, 1):
         slide_text = extract_text_context(slide)
@@ -91,20 +68,26 @@ def process_deck(deck_path, images_root, deck_context=''):
             if sh.shape_type == MSO_SHAPE_TYPE.GROUP:
                 n_groups_seen += 1
 
-        for shape, depth in iter_pictures_recursive(slide.shapes):
+        for pic in iter_slide_pics(slide):
+            depth = pic['depth']
+            if pic['rid'] is None:
+                # No r:embed. Linked/external picture (or malformed blip): cannot
+                # hash bytes -> SKIP + structured log (parity with apply/verify).
+                n_linked_skipped += 1
+                print(f"  SKIP slide {s_idx} pic id={pic['pic_id']} "
+                      f"name={pic['pic_name']!r}: "
+                      f"{'linked (r:link, no r:embed)' if pic['linked'] else 'no r:embed on a:blip'}")
+                continue
             try:
-                blob = shape.image.blob
-                ext = shape.image.ext
-            except Exception:
+                blob = resolve_blob(slide, pic['rid'])
+                ext = guess_ext(slide.part.related_part(pic['rid']))
+            except Exception as e:
+                print(f"  SKIP slide {s_idx} pic id={pic['pic_id']}: "
+                      f"blob resolve failed ({type(e).__name__})")
                 continue
             h = hashlib.sha256(blob).hexdigest()[:12]
-            try:
-                cNvPr = shape._element.nvPicPr.cNvPr
-                pic_id = cNvPr.get('id')
-                pic_name = cNvPr.get('name')
-                old_descr = cNvPr.get('descr', '')
-            except AttributeError:
-                pic_id = ''; pic_name = ''; old_descr = ''
+            pic_id = pic['pic_id']; pic_name = pic['pic_name']
+            old_descr = pic['old_descr']
             fname = f"{h}.{ext}"
             if h not in seen:
                 with open(os.path.join(deck_dir, fname), 'wb') as f:
@@ -121,6 +104,7 @@ def process_deck(deck_path, images_root, deck_context=''):
         'deck': deck, 'deck_path': os.path.abspath(deck_path),
         'n_slides': len(prs.slides), 'n_pictures': len(pictures),
         'n_unique_images': len(seen), 'n_top_level_groups_seen': n_groups_seen,
+        'n_linked_skipped': n_linked_skipped,
         'pictures': pictures, 'deck_context': deck_context,
     }
 
@@ -129,7 +113,7 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument('input', help='Single .pptx or a directory of .pptx files')
     ap.add_argument('work_dir', help='Output working directory')
-    ap.add_argument('--context', default='', help='Deck-level overarching context (e.g., "Lecture 3: Decision Trees")')
+    ap.add_argument('--context', default='', help='Deck-level overarching context (e.g., "Biology 101, Lecture 3: Mitosis")')
     args = ap.parse_args()
 
     inp = os.path.abspath(args.input)

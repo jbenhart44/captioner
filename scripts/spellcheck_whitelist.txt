@@ -1,0 +1,56 @@
+# captioner spell-check whitelist — terms that are NOT errors.
+# One token per line, matched case-insensitively. Lines starting with # are comments.
+# Conservative bias: when in doubt, whitelist a term here so captioner never
+# flags (and never "fixes") something that is not actually a misspelling.
+# Users may freely extend this file; it ships with the skill.
+
+# --- finance / managerial-finance (EGR 505) ---
+npv irr wacc capm ebitda ebit fcf roe roa roi eps dcf pv fv ytm ytms apr apy
+amortization amortized perpetuity annuity discounting compounding payback
+levered unlevered beta covariance variance stdev cashflow cashflows opex capex
+proprietorship proprietorships sarbanes oxley dodd-frank nafta usmca mercosur
+cafta cptpp tcja gaap fasb sec irs fdi forex npvs irrs mncs ceos
+pearson zutter gitman gant mylab proforma
+
+# --- engineering / AI (EM 534, EGR 507) ---
+llm llms genai gan gans rag llmops mlops modelops gpu gpus tpu tpus cpu cpus
+api apis sdk transformer transformers tokenizer tokenizers tokenization
+embeddings multimodal generative pretrained finetuning finetune chatbot
+chatbots agentic scalable monetization subscription subscriptions onboarding
+roadmap dashboard dashboards analytics startups startup ecosystem perceptron
+cnns cnn rnn rnns nlp sota okrs okr devops preprocessing deduplicate
+subdisciplines homomorphic preprints autocad
+saas paas iaas tech mgmt fintech biotech cybersecurity ecommerce
+fsd vc vcs tam sam som mvp poc roi kpi kpis ml ai genai aiops
+
+# --- platforms / brands / proper nouns seen in decks ---
+moodle syllabus rubric coursera udemy edx udacity youtube chatgpt gemini
+claude copilot alexa siri github gitlab linkedin arxiv aaai neurips icml
+iclr kaggle colab jupyter openai anthropic synthesia runwayml apptronik
+recursion genentech roche kleiner perkins deepmind huggingface pytorch
+tensorflow nvidia mckinsey zapier jira slack notion airtable salesforce
+deepseek mistral llama palm bard perplexity midjourney stability lakera
+sanebox superhuman wolfram siemens teamcenter garmin verizon nasdaq nyse
+mcdonald walmart boeing uber pwc forbes bloomberg taleb nassim dimson
+staunton marsh elroy haines christensen geoffrey moore caufield byers
+blackman droids ncsu mem egr
+
+# --- captioner / accessibility domain ---
+captioner pptx ooxml descr wcag smartart
+
+# --- url / citation fragments ---
+https http www html url urls inc llc ltd
+
+# --- triaged false-positives from the 2026-05-18 NCSU MEM run (domain terms,
+#     product names, and proper nouns the generic dictionary flags wrongly) ---
+# finance (505)
+forma perpetuity annuity levered unlevered ebitda capex opex amortization
+proprietorship proprietorships putable preferreds takt mylab walgreens lowes
+# product mgmt / compliance (507)
+upsell influencers autocad garmin teamcenter masterplan
+# AI / EM (534)
+perceptron preprocessing preprocess subdisciplines homomorphic preprints
+deduplicate sota devops zapier udacity sanebox nemo lakera vizma agentic
+multimodal pretraining finetuning tokenization embeddings llmops mlops
+# verified proper nouns / brands (web-checked)
+geoffrey clayton christensen siemens wolfram apptronik mckinsey

@@ -1,6 +1,6 @@
 ---
 name: captioner
-description: Add brief compliance-style captions under every picture in PowerPoint (.pptx) decks. Reads each photo, generates a short subject-identifying caption (5-15 words), and inserts a visible italic text box under each picture. Supports dry-run, idempotent re-runs, recursive group traversal, configurable styling, and deck-level context.
+description: Add brief compliance-style captions under every picture in PowerPoint (.pptx) decks. Reads each photo, generates a short subject-identifying caption (5-15 words), and inserts a visible italic text box under each picture. Supports dry-run, idempotent re-runs, recursive group traversal, configurable styling, deck-level context, and an optional whitelist-aware spell/QC pass.
 ---
 
 # /captioner — PowerPoint Picture Caption Agent
@@ -23,7 +23,7 @@ Add **brief, compliance-style captions** under every picture in one or more `.pp
 3. **Lead with category** when useful — `Photo:`, `Chart:`, `Diagram:`, `Screenshot:`, `Logo:`, `Map:`, `Illustration:`.
 4. **No "image of" / "picture of"** filler.
 5. **Decorative images** (small icons, bullet markers, slide-master logos repeated on every slide): caption value `[decorative]` — logged, NO visible text added to slide.
-6. **Context-aware**: if you can see slide text or the user passed `--context "Lecture 3 — Module 5 overview"`, use it. Photo of cells on slide titled "Mitosis" → "Diagram: cell mitosis stages" not "Photo: pink shapes on white."
+6. **Context-aware**: if you can see slide text or the user passed `--context "Biology 101 Lecture 3"`, use it. Photo of cells on slide titled "Mitosis" → "Diagram: cell mitosis stages" not "Photo: pink shapes on white."
 
 ## Workflow (when /captioner is invoked)
 
@@ -37,7 +37,9 @@ Add **brief, compliance-style captions** under every picture in one or more `.pp
 ```bash
 python3 "$CLAUDE_PROJECT_DIR/.claude/skills/captioner/scripts/extract_images.py" <input-path> <work-dir> [--context "<deck-context>"]
 ```
-Produces `<work-dir>/manifest.json` and `<work-dir>/images/<deck>/<hash>.<ext>`. **Errored decks (corrupt / password-protected) are logged in the manifest, not crashed on.** Group shapes are traversed recursively — pictures nested inside groups are captured.
+Produces `<work-dir>/manifest.json` and `<work-dir>/images/<deck>/<hash>.<ext>`. **Errored decks (corrupt / password-protected) are logged in the manifest, not crashed on.**
+
+**Picture enumeration (raw-OOXML).** extract/apply/verify enumerate every `<p:pic>` in each slide's shape tree via lxml (`scripts/_oxml_pics.py`), NOT python-pptx `shape_type == PICTURE`. This matters: python-pptx classifies a picture content-placeholder (`<p:pic>` carrying `<p:ph type="pic"/>`) as `PLACEHOLDER`, **not** `PICTURE`, so the old walk silently skipped every placeholder-hosted picture (a real-world deck where the extractor saw only ~8% of its pictures). The `.//p:pic` descent also captures group-nested pictures, so the three scripts now enumerate an identical population. `<mc:Choice>` subtrees are stripped so an `<mc:AlternateContent>` picture is counted once (the Fallback); linked pictures with no `r:embed` are skipped + logged; hidden shapes are skipped. The SHA-256 image hash and `captions.json` key format are byte-unchanged (prior reuse indexes still match).
 
 ### Step 3 — Read images and generate brief captions
 For each unique image:
@@ -54,15 +56,23 @@ For each unique image:
 ```bash
 python3 "$CLAUDE_PROJECT_DIR/.claude/skills/captioner/scripts/apply_captions.py" <work-dir> --dry-run
 ```
-This emits the audit CSV showing **what would be added**, without modifying any `.pptx`. Surface the audit CSV to the user, ask if they want to proceed, edit `captions.json` if needed.
+This emits `audit/<deck>_audit_dryrun.csv` showing **what would be added**, without modifying any `.pptx`. (Dry-run uses its own filename so it can never overwrite a prior real `_audit.csv`.) Surface it to the user, ask if they want to proceed, edit `captions.json` if needed.
 
-### Step 5 — Apply captions
+### Step 4.5 — Name verification (REQUIRED before presenting any name fix)
+QC runs by default (see Step 5). For every `qc/<deck>_spellcheck.csv` row with **`verify_name=true`** (the flagged term looks like a proper noun — person, company, product, place), you MUST web-verify the canonical spelling with `WebSearch`/`WebFetch` **before** presenting it to the user as a correction. Do not assert a name fix from model memory alone. If the web check confirms the suspected term is actually correct, drop it (do not "fix" a real name); if it confirms a misspelling, present the web-verified spelling with its source. Rationale: an earlier run nearly "corrected" valid names; in-document context + a web check is the bar.
+
+### Step 5 — Apply captions (QC is ON by default)
 ```bash
 python3 "$CLAUDE_PROJECT_DIR/.claude/skills/captioner/scripts/apply_captions.py" <work-dir> \
   [--font-name Calibri] [--font-size 10] [--font-color 333333] [--italic true] \
-  [--update-existing] [--gap-emu 50000] [--height-emu 400000]
+  [--update-existing] [--gap-emu 50000] [--height-emu 400000] \
+  [--quick | --no-spellcheck | --no-dateqc]
 ```
-Produces `<work-dir>/captioned_decks/<deck>_captioned.pptx` and `<work-dir>/audit/<deck>_audit.csv`.
+**Default behaviour: spell-check + date/template QC both run** unless the user asks for the quick (captioning-only) variant. Toggles: `--quick` = captioning only, skip all QC; `--no-spellcheck` / `--no-dateqc` = disable just that one. (The old `--spellcheck` flag is still accepted as a no-op since QC is now default-on.)
+
+Produces `<work-dir>/captioned_decks/<deck>_captioned.pptx`, `<work-dir>/audit/<deck>_audit.csv`, and (QC default-on) `<work-dir>/qc/<deck>_spellcheck.csv` + `<work-dir>/qc/<deck>_qc.csv`. QC artifacts live in their **own `qc/` directory**, never the caption `audit/` dir.
+
+**pyspellchecker is required for the default spell-check.** It is an optional dependency only in the sense that captioning still works without it — but because spell-check is now default-on, a missing `pyspellchecker` is treated as a **loud failure**: captioner prints a banner, drops `qc/SPELLCHECK_NOT_RUN.txt`, and **exits 3** (captions still applied). Either run via a Python that has `pyspellchecker` installed (`pip install pyspellchecker`, or a virtualenv if your system Python is PEP 668 / externally-managed), or pass `--no-spellcheck` / `--quick` to explicitly proceed without it.
 
 **Re-runs**: if the user re-runs against the same source, the previous captioner text boxes are recognizable by their shape name prefix `captioner_caption_<hash>`. Pass `--update-existing` to strip the prior captions before adding new ones; otherwise re-runs will DUPLICATE captions (added behind the prior text box).
 
@@ -102,9 +112,32 @@ Tell the user:
 | `--update-existing` | off | Strip prior captioner shapes before adding new ones (idempotent re-run) |
 | `--no-smartart` | off | Disable SmartArt icon captioning (on by default; auto-extracts icon names from SVG metadata) |
 | `--quiet` | off | Suppress per-deck progress |
+| `--quick` | off | **Captioning ONLY** — skip ALL QC (spell-check + date/template scan) |
+| `--no-spellcheck` | off | Disable just the spell-check pass (date/template QC still runs) |
+| `--no-dateqc` | off | Disable just the date/doubled-word/leftover-template scan |
+| `--spellcheck` | (no-op) | Back-compat alias — spell-check is now **default-on**; flag accepted, does nothing |
+
+## QC: spell-check + date/template scan (DEFAULT-ON, flag-only)
+
+QC runs **by default** on every apply (the user must opt OUT via `--quick`/`--no-*`, not opt in). Two FLAG-ONLY scanners, written to the **`qc/` directory** (never the caption `audit/` dir):
+
+**`qc/<deck>_spellcheck.csv`** — columns `slide, source, term, suggestion, known_bad, verify_name, context`. Two sources:
+- `source=caption` — captions captioner itself generated (its own output quality).
+- `source=slide-text` — the instructor's slide title/body/table text (captioner's own added shapes excluded).
+
+**`qc/<deck>_qc.csv`** — columns `slide, source, kind, detail, context`, where `kind` ∈ `doubled-word` | `leftover-template` | `date-review`. Generic only (no course-specific year/code rules); `date-review` rows are informational, not asserted wrong.
+
+Hard guarantees:
+- **Flag-only. Captioner never edits the `.pptx` and never auto-corrects.** The CSVs are review aids; a human decides.
+- **`verify_name=true`** marks a likely proper noun → the workflow MUST web-verify it before any name fix is presented (Step 4.5). Do not "fix" names from memory.
+- **Whitelist-aware so it does NOT flag non-issues.** Bundled, user-extensible `scripts/spellcheck_whitelist.txt` suppresses domain vocab/brands. Plural-of-acronym (`NPVs`, `IRRs`, `KPIs`, `GPTs`) is auto-skipped heuristically. Hard proper-noun typos a dictionary can't suggest are surfaced with `known_bad=true`.
+- Lines with URLs/email/product domains skipped; ALL-CAPS acronyms, digit/hyphen/contraction tokens, sub-4-char tokens not flagged.
+- Read-only in `--dry-run` and normal mode alike.
+- **pyspellchecker is required for the default spell-check.** Missing it is a LOUD failure: banner + `qc/SPELLCHECK_NOT_RUN.txt` + **exit 3** (captions still applied). Use a Python with `pyspellchecker`, or pass `--no-spellcheck`/`--quick` to proceed deliberately without it.
 
 ## What this skill does NOT do
 - Write to the WCAG `descr` alt-text XML field (separate workflow).
+- Auto-correct spelling — the default QC only *reports* suspects (and web-verifies names before suggesting); it never rewrites slide or caption text.
 - Read off chart values — captions identify "this is a chart of X", they don't read figures.
 - Modify the picture itself, slide master, or existing slide shapes (other than captioner-prior shapes via `--update-existing`).
 - Touch embedded charts (preserved on save; no caption added since they're not Pictures).
@@ -167,5 +200,12 @@ To disable all SmartArt handling, pass `--no-smartart`.
 | Animated picture / video | Treated as Picture if shape_type matches; otherwise skipped silently |
 
 ## Provenance
+Battle-tested on a multi-hundred-deck graduate-course remediation run. Hardened iteratively from real production feedback:
 
-Captioner was built and hardened across a real production run of 1,132 captions across 32 PowerPoint decks in three graduate engineering courses (Summer 2026). It was hardened following an independent external code review (recursive group traversal, dry-run, error handling, idempotency marker, style flags, deck context, hidden-shape skip, progress prints) and extended after production feedback (white-card background fill for dark-slide legibility; SmartArt per-icon captioning from SVG `id` metadata; the context-hygiene workflow rule for large batches). See CHANGELOG.md for the dated release history.
+- **Recursive group traversal, dry-run, fail-safe error handling, idempotency marker, style flags, deck context, hidden-shape skip, progress output.**
+- **White-card background fill** for caption text boxes (`--bg-color`/`--border-color`, default-on) so captions stay legible on dark/section-divider slide backgrounds.
+- **SmartArt icon captioning**: each embedded PowerPoint Icon gets its own short caption, name pulled from SVG `id` metadata (no vision pass); text-only SmartArts skipped.
+- **Context-hygiene workflow**: finish one deck end-to-end before reading the next deck's images; for 5+ deck batches, dispatch via background subagents so image reads stay scoped.
+- **Raw-OOXML picture enumeration** replacing the python-pptx `shape_type` walk, after a real deck where the old walk saw only ~8% of its pictures (placeholder-hosted `<p:pic>` are typed `PLACEHOLDER`, not `PICTURE`). Adversarially verified; SHA-256 hash + `captions.json` key format unchanged.
+- **Default-on whitelist-aware spell/QC pass** with proper-noun web-verification guidance and fail-loud behaviour when `pyspellchecker` is absent.
+- **Placement hardening**: placeholder-inherited geometry resolved; captions kept on-slide and clear of footer and title placeholders.

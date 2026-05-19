@@ -6,6 +6,12 @@ Usage:
 import sys, os, json, hashlib, glob
 from pptx import Presentation
 from pptx.enum.shapes import MSO_SHAPE_TYPE
+from _oxml_pics import iter_slide_pics, resolve_blob, guess_ext
+
+# Fix: pic enumeration switched to the same strict
+# raw-OOXML slide-spTree `.//p:pic` walk as extract/apply (see _oxml_pics.py),
+# so verify's pic count == extract's count (oracle requirement). The old code
+# used `shape_type == PICTURE` AND never recursed `<p:grpSp>` -> double miss.
 
 
 def main():
@@ -31,12 +37,13 @@ def main():
                     t = (sh.text_frame.text or '').strip()
                     if t:
                         textboxes.append(t)
-            for sh in slide.shapes:
-                if sh.shape_type != MSO_SHAPE_TYPE.PICTURE:
-                    continue
+            for pic in iter_slide_pics(slide):
+                if pic['rid'] is None:
+                    continue  # linked/no-embed pic: skipped at extract too
                 total_pics += 1
                 try:
-                    blob = sh.image.blob; ext = sh.image.ext
+                    blob = resolve_blob(slide, pic['rid'])
+                    ext = guess_ext(slide.part.related_part(pic['rid']))
                     h = hashlib.sha256(blob).hexdigest()[:12]
                     key = f"{deck}/{h}.{ext}"
                     expected = captions.get(key)
