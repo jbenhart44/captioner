@@ -4,6 +4,26 @@ All notable changes to captioner are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.2] - 2026-05-19
+
+Patch release. One placement improvement on top of v0.2.1.
+
+### Fixed
+
+- **Caption for picture-N no longer lands inside picture-M on multi-picture
+  slides.** Every other picture's vertical band on the slide is now part of
+  the caption placement obstacle list (the caption's own picture is filtered
+  out by `pic_id` so it can still anchor adjacent). On a 49-deck production
+  corpus, `FULLBLEED-OVERLAY` audit rows dropped 31 → 19 with this change.
+
+### Behaviour notes
+
+- The caption count placed per deck may drop slightly compared to v0.2.1 when
+  a slide has two large pictures whose vertical bands cover most of the slide
+  — captions that previously landed inside the neighbouring picture are now
+  correctly skipped, surfaced as `overlay-fullbleed` or `flagged-no-slot`
+  audit rows for human review.
+
 ## [0.2.1] - 2026-05-19
 
 Placement-quality release. Five real-deck failure patterns surfaced by user review of v0.2.0 output are now prevented in placement and surfaced explicitly in the audit. SmartArt-icon caption placement inherits the same guarantees as the main caption path.
@@ -118,6 +138,7 @@ captions over 32 PowerPoint decks in three graduate engineering courses.
   workflow for WCAG 2.1 AA conformance.
 - `.ppt` legacy format is not supported (python-pptx handles `.pptx` only).
 
+[0.2.2]: https://github.com/jbenhart44/captioner/releases/tag/v0.2.2
 [0.2.1]: https://github.com/jbenhart44/captioner/releases/tag/v0.2.1
 [0.2.0]: https://github.com/jbenhart44/captioner/releases/tag/v0.2.0
 [0.1.1]: https://github.com/jbenhart44/captioner/releases/tag/v0.1.1

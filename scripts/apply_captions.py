@@ -673,6 +673,18 @@ def apply_to_deck(deck_info, captions, captioned_dir, audit_dir, style, opts):
         effective_footer_limit = footer_limit - FOOTER_CLEARANCE_EMU
         title_rect = _g_slide_title_rect(slide)
         body_bands = _g_body_bands(slide)
+        # v0.2.1 hardening: collect every picture's vertical band so a caption
+        # for picture-N never lands inside picture-M on the same slide. The
+        # caption's own picture is filtered out at use-time so it can still be
+        # placed adjacent to its own picture.
+        all_pic_bands: list[tuple[int, int, int]] = []  # (y_top, y_bottom, pic_id)
+        for _pic_scan in iter_slide_pics(slide):
+            _o_top = _pic_scan.get('off_y')
+            _o_h   = _pic_scan.get('ext_cy')
+            if _o_top is None or _o_h is None:
+                continue
+            all_pic_bands.append((int(_o_top), int(_o_top) + int(_o_h),
+                                  _pic_scan.get('pic_id', '')))
         # Per-slide accumulator for Fix-E (caption-caption overlap avoidance).
         # MUST reset here, at the top of each slide loop — not before, not inside pic loop.
         placed_caps: list[tuple[int, int, int, int]] = []
@@ -903,12 +915,18 @@ def apply_to_deck(deck_info, captions, captioned_dir, audit_dir, style, opts):
             cands.append(('fallback-bottom', forced_top, forced_h))
 
             # Fix-A + Fix-E merge: a single obstacle list. Caption must clear
-            # title + body/subtitle text shapes + previously-placed captions.
+            # title + body/subtitle text shapes + previously-placed captions
+            # + every OTHER picture on this slide (so a caption for pic-N
+            # doesn't land inside pic-M on the same multi-picture slide).
             obstacles = []
             if title_rect is not None:
                 obstacles.append(title_rect)
             obstacles.extend(body_bands)
-            obstacles.extend(placed_caps)  # vertical-only via _clear_all_obstacles
+            obstacles.extend(placed_caps)
+            for _y_top, _y_bot, _pid in all_pic_bands:
+                if _pid == pic_id:
+                    continue  # skip the caption's own picture
+                obstacles.append((_y_top, _y_bot))
 
             pick = next((c for c in cands
                          if _clear_all_obstacles(c[1], c[2], obstacles)),
