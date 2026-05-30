@@ -50,10 +50,10 @@ def main() -> int:
         shutil.copy(CAPTIONS_FIXTURE, work / "captions.json")
         subprocess.run(
             [sys.executable, str(REPO / "scripts" / "apply_captions.py"),
-             str(work), "--dry-run"],
+             str(work), "--dry-run", "--no-spellcheck"],
             check=True, capture_output=True, text=True,
         )
-        audit = work / "audit" / "sample_audit.csv"
+        audit = work / "audit" / "sample_audit_dryrun.csv"
         assert audit.exists(), f"missing audit CSV: {audit}"
         rows = list(csv.DictReader(audit.read_text().splitlines()))
         assert len(rows) == 2, f"expected 2 audit rows, got {len(rows)}"

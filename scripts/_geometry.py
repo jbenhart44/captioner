@@ -5,8 +5,14 @@ all three agree on slide-band thresholds, footer clearance, and obstacle-rect
 semantics. Keeping these constants/functions in one place prevents drift —
 which previously caused audit-vs-apply geometric mismatches.
 
-Vertical-only obstacle checking is the v0.2.1 contract. v0.3.0 may upgrade
-to 2D box-intersection (placement-budget pre-pass architecture).
+v0.2.2 adds true 2D box-intersection obstacle checking (`clear_all_obstacles_2d`
++ `slide_body_obstacle_rects`): a caption is only "blocked" by an obstacle when
+it overlaps in BOTH axes. This fixes two v0.2.1 defects: (1) vertical-only
+checks falsely blocked captions that were horizontally clear of a narrow
+title/body placeholder (forcing bad fallbacks), and (2) caption-caption
+avoidance was silently disabled because placed-caption rects (l,t,w,h) were
+misread as (L,T,R,B). The legacy vertical-only helpers (`_clear_all_obstacles`,
+`_voverlap`, `slide_body_obstacle_bands`) are retained for back-compat.
 """
 import os
 from pptx.enum.shapes import PP_PLACEHOLDER
@@ -29,7 +35,10 @@ BODY_TYPES   = {PP_PLACEHOLDER.BODY, PP_PLACEHOLDER.SUBTITLE,
 FOOTER_TYPES = {PP_PLACEHOLDER.FOOTER, PP_PLACEHOLDER.DATE,
                 PP_PLACEHOLDER.SLIDE_NUMBER}
 
-CAPTION_NAME_PREFIXES = ('captioner_caption_', 'captioner_sa_icon_')
+# captioner_capband_ = a caption deliberately placed in the bottom strip of its
+# OWN picture (v0.2.3 fallback) — better than covering text or skipping. The
+# audit / verify in-picture checks exempt this prefix (the overlap is intended).
+CAPTION_NAME_PREFIXES = ('captioner_caption_', 'captioner_sa_icon_', 'captioner_capband_')
 
 
 # ---------------------------------------------------------------------------
@@ -142,6 +151,112 @@ def slide_body_obstacle_bands(slide):
     return bands
 
 
+def slide_body_obstacle_rects(slide):
+    """List of (L, T, R, B) EMU rects for every body-type placeholder with
+    visible text on this slide. The 2D successor to slide_body_obstacle_bands
+    — carries horizontal extent so clear_all_obstacles_2d can tell a narrow
+    centered subtitle apart from a right-side caption that doesn't touch it.
+    """
+    rects = []
+    for sh in slide.shapes:
+        if (sh.name or '').startswith(CAPTION_NAME_PREFIXES):
+            continue
+        try:
+            pf = sh.placeholder_format
+            if pf is None or pf.type not in BODY_TYPES:
+                continue
+            if not (getattr(sh, 'has_text_frame', False)
+                    and sh.text_frame.text.strip()):
+                continue
+            if None in (sh.left, sh.top, sh.width, sh.height):
+                continue
+            l, t = int(sh.left), int(sh.top)
+            rects.append((l, t, l + int(sh.width), t + int(sh.height)))
+        except Exception:
+            continue
+    return rects
+
+
+def _visible_text_rect(sh):
+    """(L, T, R, B) approximating the VISIBLE text region of a text shape, not its
+    full bounding box. A title placeholder is often a tall box with one top-anchored
+    line of text — using the full bbox makes a caption sitting below the title text
+    (but inside the empty lower bbox) look like an overlap. Estimate the text height
+    from paragraph/character counts and anchor it (top/middle/bottom) within the box.
+    Conservative: never smaller than one line, never larger than the box."""
+    l, t, w, hgt = int(sh.left), int(sh.top), int(sh.width), int(sh.height)
+    try:
+        tf = sh.text_frame
+        cpl = max(8, w // EMU_PER_CHAR_DEFAULT)
+        lines = 0
+        for para in tf.paragraphs:
+            txt = (para.text or '')
+            if txt.strip():
+                lines += max(1, (len(txt) + cpl - 1) // cpl)
+        lines = max(1, lines)
+        vis_h = min(hgt, lines * 235_000 + 60_000)  # ~0.26in/line + padding
+        anchor = None
+        try:
+            anchor = tf.vertical_anchor  # MSO_ANCHOR or None (None ~ top)
+        except Exception:
+            anchor = None
+        a = str(anchor) if anchor is not None else 'TOP'
+        if 'BOTTOM' in a:
+            vt = t + hgt - vis_h
+        elif 'MIDDLE' in a or 'CENTER' in a:
+            vt = t + (hgt - vis_h) // 2
+        else:                       # TOP / unknown / inherited
+            vt = t
+        return (l, vt, l + w, vt + vis_h)
+    except Exception:
+        return (l, t, l + w, t + hgt)
+
+
+def slide_text_obstacle_rects(slide):
+    """List of (L, T, R, B) EMU rects for the VISIBLE text region of EVERY shape on
+    the slide that carries text — title, body/subtitle, AND ordinary text boxes /
+    auto-shapes (AUTO_SHAPE, TEXT_BOX) that are NOT placeholders. v0.2.3 closed the
+    gap where captions covered text in plain text boxes; v0.2.3.1 narrows each
+    obstacle to its estimated visible-text region (anchor-aware) so a caption below
+    a top-anchored title's text isn't falsely blocked by the title's tall empty box.
+    Excludes captioner's own shapes and footer/date/slide-number placeholders.
+    """
+    rects = []
+    for sh in slide.shapes:
+        try:
+            nm = sh.name or ''
+            if nm.startswith(CAPTION_NAME_PREFIXES):
+                continue
+            try:
+                pf = sh.placeholder_format
+                if pf is not None and pf.type in FOOTER_TYPES:
+                    continue
+            except Exception:
+                pass
+            if not (getattr(sh, 'has_text_frame', False)
+                    and sh.text_frame.text.strip()):
+                continue
+            if None in (sh.left, sh.top, sh.width, sh.height):
+                continue
+            rects.append(_visible_text_rect(sh))
+        except Exception:
+            continue
+    return rects
+
+
+def estimate_caption_height(text, box_width_emu, line_height_emu=160_000,
+                            margin_emu=40_000, nominal_emu=MIN_CAPTION_HEIGHT):
+    """Estimate the rendered height of an auto-sizing caption box so placement and
+    overlap math use the height the box will ACTUALLY occupy (a 2-line caption in a
+    1-line box otherwise grows down onto whatever is below it). Conservative: floors
+    at `nominal_emu`, assumes ~EMU_PER_CHAR_DEFAULT per character for wrap."""
+    if not text:
+        return nominal_emu
+    cpl = max(8, int(box_width_emu // EMU_PER_CHAR_DEFAULT))
+    lines = max(1, (len(text) + cpl - 1) // cpl)
+    return max(nominal_emu, lines * line_height_emu + margin_emu)
+
+
 # ---------------------------------------------------------------------------
 # Vertical overlap predicates.
 # ---------------------------------------------------------------------------
@@ -177,6 +292,56 @@ def _clear_all_obstacles(c_top, c_h, obstacles, frac=0.15):
         else:
             continue
         if _voverlap_band(c_top, c_h, y_top, y_bottom, frac):
+            return False
+    return True
+
+
+# ---------------------------------------------------------------------------
+# 2D obstacle clearance (v0.2.2) — require overlap in BOTH axes to block.
+# ---------------------------------------------------------------------------
+def _to_ltrb(obs):
+    """Normalize an obstacle into an (L, T, R, B) rect, or None if it can't be.
+      - 4-tuple already (L, T, R, B)  -> as-is
+      - 2-tuple (y_top, y_bottom)     -> full-width band (no horizontal info):
+        return None so the caller can fall back to a vertical-only test rather
+        than guess an x-extent. (All v0.2.2 apply-side obstacles are 4-tuples.)
+    """
+    if obs is None:
+        return None
+    if len(obs) == 4:
+        return (obs[0], obs[1], obs[2], obs[3])
+    return None
+
+
+def _rects_block(cap, obs, vfrac=0.15):
+    """True if caption rect `cap`=(L,T,R,B) is BLOCKED by obstacle `obs`=(L,T,R,B):
+    they share horizontal extent (ix > 0) AND vertically overlap by more than
+    `vfrac` of the caption's height. Both conditions required — a horizontally
+    disjoint obstacle never blocks (the core v0.2.2 fix)."""
+    cl, ct, cr, cb = cap
+    ol, ot, orr, ob = obs
+    ix = min(cr, orr) - max(cl, ol)
+    iy = min(cb, ob) - max(ct, ot)
+    c_h = max(1, cb - ct)
+    return ix > 0 and iy > vfrac * c_h
+
+
+def clear_all_obstacles_2d(cap_rect, obstacles, vfrac=0.15):
+    """True if caption `cap_rect`=(L,T,R,B) clears EVERY obstacle in 2D.
+    A 4-tuple obstacle is tested in 2D; a 2-tuple (y_top,y_bottom) obstacle,
+    which lacks horizontal extent, falls back to the legacy vertical-only test
+    (conservative — treats it as full-width)."""
+    cl, ct, cr, cb = cap_rect
+    c_h = max(1, cb - ct)
+    for obs in obstacles:
+        r = _to_ltrb(obs)
+        if r is None:
+            # No horizontal info — vertical-only fallback (full-width band).
+            if obs is not None and len(obs) == 2:
+                if _voverlap_band(ct, c_h, obs[0], obs[1], vfrac):
+                    return False
+            continue
+        if _rects_block(cap_rect, r, vfrac):
             return False
     return True
 

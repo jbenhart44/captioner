@@ -4,7 +4,7 @@
 # flags (and never "fixes") something that is not actually a misspelling.
 # Users may freely extend this file; it ships with the skill.
 
-# --- finance / managerial-finance (EGR 505) ---
+# --- finance / managerial-finance ---
 npv irr wacc capm ebitda ebit fcf roe roa roi eps dcf pv fv ytm ytms apr apy
 amortization amortized perpetuity annuity discounting compounding payback
 levered unlevered beta covariance variance stdev cashflow cashflows opex capex
@@ -12,7 +12,7 @@ proprietorship proprietorships sarbanes oxley dodd-frank nafta usmca mercosur
 cafta cptpp tcja gaap fasb sec irs fdi forex npvs irrs mncs ceos
 pearson zutter gitman gant mylab proforma
 
-# --- engineering / AI (EM 534, EGR 507) ---
+# --- engineering / AI domain ---
 llm llms genai gan gans rag llmops mlops modelops gpu gpus tpu tpus cpu cpus
 api apis sdk transformer transformers tokenizer tokenizers tokenization
 embeddings multimodal generative pretrained finetuning finetune chatbot
@@ -33,7 +33,6 @@ deepseek mistral llama palm bard perplexity midjourney stability lakera
 sanebox superhuman wolfram siemens teamcenter garmin verizon nasdaq nyse
 mcdonald walmart boeing uber pwc forbes bloomberg taleb nassim dimson
 staunton marsh elroy haines christensen geoffrey moore caufield byers
-blackman droids ncsu mem egr
 
 # --- captioner / accessibility domain ---
 captioner pptx ooxml descr wcag smartart
@@ -43,12 +42,12 @@ https http www html url urls inc llc ltd
 
 # --- triaged false-positives from a real production run (domain terms,
 #     product names, and proper nouns the generic dictionary flags wrongly) ---
-# finance (505)
+# finance
 forma perpetuity annuity levered unlevered ebitda capex opex amortization
 proprietorship proprietorships putable preferreds takt mylab walgreens lowes
-# product mgmt / compliance (507)
+# product mgmt / compliance
 upsell influencers autocad garmin teamcenter masterplan
-# AI / EM (534)
+# AI / EM
 perceptron preprocessing preprocess subdisciplines homomorphic preprints
 deduplicate sota devops zapier udacity sanebox nemo lakera vizma agentic
 multimodal pretraining finetuning tokenization embeddings llmops mlops

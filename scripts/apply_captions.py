@@ -31,20 +31,20 @@ Improvements (from Gemini review v1/v2):
   - Per-deck try/except — corrupt/password-protected file does not halt batch
 """
 import sys, os, json, shutil, csv, hashlib, argparse, re
+from collections import Counter
 from pptx import Presentation
 from pptx.enum.shapes import MSO_SHAPE_TYPE
 from pptx.util import Emu, Pt
 from _oxml_pics import iter_slide_pics, resolve_blob, guess_ext
 from _geometry import (
     slide_footer_top as _g_slide_footer_top,
-    slide_title_rect as _g_slide_title_rect,
-    slide_body_obstacle_bands as _g_body_bands,
-    _clear_all_obstacles, visible_coverage,
+    slide_text_obstacle_rects as _g_text_rects,
+    clear_all_obstacles_2d, visible_coverage, estimate_caption_height,
     FOOTER_CLEARANCE_EMU, MIN_CAPTION_WIDTH_EMU, EMU_PER_CHAR_DEFAULT,
     MIN_CAPTION_HEIGHT as _G_MIN_CAPTION_HEIGHT,
 )
 
-# Fix: pic enumeration switched to the strict
+# Pic enumeration uses the strict
 # raw-OOXML slide-spTree `.//p:pic` walk (see _oxml_pics.py), matching
 # extract/verify exactly. Placement geometry reads the pic's own
 # <a:off>/<a:ext> EMU; verified byte-identical to the old pic.left/.top/
@@ -54,6 +54,7 @@ from pptx.dml.color import RGBColor
 from pptx.enum.text import PP_ALIGN, MSO_AUTO_SIZE
 
 CAPTION_SHAPE_NAME_PREFIX = 'captioner_caption_'  # idempotency marker
+CAPTION_BAND_NAME_PREFIX = 'captioner_capband_'   # caption deliberately in own-picture bottom strip
 SMARTART_SHAPE_NAME_PREFIX = 'captioner_smartart_'  # idempotency marker for SmartArt captions
 SMARTART_ICON_SHAPE_NAME_PREFIX = 'captioner_sa_icon_'  # idempotency marker for per-icon SmartArt captions
 MIN_CAPTION_HEIGHT = 250000
@@ -197,8 +198,7 @@ def resolve_ph_geometry(slide, ph_idx):
     """A picture content-placeholder's geometry is inherited from the layout/
     master; the <p:pic> itself often has NO <a:xfrm>. python-pptx resolves the
     inheritance, so match the slide placeholder by idx and read its effective
-    box. Returns (left, top, width, height) EMU or None. (The 
-    off-page-caption bug: placeholder pics fell back to (0, 50000).)"""
+    box. Returns (left, top, width, height) EMU or None. (Without this, placeholder pics fall back to a degenerate (0, 50000) box.)"""
     try:
         for ph in slide.placeholders:
             pf = ph.placeholder_format
@@ -253,7 +253,7 @@ def slide_footer_top(slide, slide_h):
                 # A footer is in the BOTTOM band. A footer/date/slide-number
                 # placeholder parked at the TOP of a master (top < band) is
                 # NOT a bottom footer — ignore it, else the reserved band
-                # collapses to the slide top ().
+                # collapses to the slide top (a degenerate-band edge case).
                 if top >= band and (is_foot or has_txt):
                     limit = min(limit, int(top))
             except Exception:
@@ -613,27 +613,63 @@ def iter_pictures_recursive(shapes, depth=0):
             continue
 
 
-def remove_previous_caption_shapes(slide, target_pic_hash=None):
+def remove_previous_caption_shapes(slide, target_pic_hash=None,
+                                   oracle=None, force_overwrite_edits=False):
     """Remove caption text boxes previously added by /captioner.
 
     If target_pic_hash given, only remove captions matching that picture's hash
     (encoded in the shape name suffix). Else remove all captioner captions on slide.
-    Returns count removed.
+
+    Edit-aware (v0.2.2): if `oracle` (hash -> original caption text from the prior
+    audit CSV) is given and a caption's current text DIFFERS from the original, the
+    caption is treated as an instructor hand-edit and is PRESERVED (not removed),
+    unless force_overwrite_edits=True. Returns (n_removed, n_preserved_edits).
     """
     spTree = slide.shapes._spTree
     to_remove = []
+    preserved = 0
     for sh in slide.shapes:
         name = ''
         try:
             name = sh.name or ''
         except Exception:
             continue
-        if name.startswith(CAPTION_SHAPE_NAME_PREFIX):
-            if target_pic_hash is None or name.endswith(target_pic_hash):
-                to_remove.append(sh._element)
+        if not name.startswith(CAPTION_SHAPE_NAME_PREFIX):
+            continue
+        if target_pic_hash is not None and not name.endswith(target_pic_hash):
+            continue
+        if oracle and not force_overwrite_edits:
+            h = name[len(CAPTION_SHAPE_NAME_PREFIX):]
+            orig = oracle.get(h)
+            try:
+                cur = sh.text_frame.text if getattr(sh, 'has_text_frame', False) else ''
+            except Exception:
+                cur = ''
+            if orig is not None and cur.strip() and cur.strip() != orig.strip():
+                preserved += 1   # instructor edit — leave it in place
+                continue
+        to_remove.append(sh._element)
     for el in to_remove:
         spTree.remove(el)
-    return len(to_remove)
+    return len(to_remove), preserved
+
+
+def load_caption_oracle(audit_dir, deck):
+    """hash -> original caption text, from the prior <deck>_audit.csv (if any).
+    Used by edit-aware --update-existing to detect instructor hand-edits."""
+    oracle = {}
+    p = os.path.join(audit_dir, f"{deck}_audit.csv")
+    if not os.path.exists(p):
+        return oracle
+    try:
+        with open(p, encoding='utf-8', newline='') as f:
+            for r in csv.DictReader(f):
+                h, cap = r.get('image_hash', ''), r.get('caption', '')
+                if h and cap and cap.strip().lower() not in ('[decorative]', 'decorative'):
+                    oracle.setdefault(h, cap)
+    except Exception:
+        pass
+    return oracle
 
 
 def apply_to_deck(deck_info, captions, captioned_dir, audit_dir, style, opts):
@@ -648,10 +684,21 @@ def apply_to_deck(deck_info, captions, captioned_dir, audit_dir, style, opts):
     dst_name = f"{deck}_captioned.pptx" if not deck.endswith('_captioned') else f"{deck}.pptx"
     dst = os.path.join(captioned_dir, dst_name)
 
+    # Edit-aware oracle: prior audit CSV (hash -> original caption). Loaded
+    # BEFORE we overwrite the audit, so --update-existing can spot hand-edits.
+    caption_oracle = (load_caption_oracle(audit_dir, deck)
+                      if opts['update_existing'] else {})
+
     if opts['dry_run']:
         # Don't copy; we'll only inspect
         prs = Presentation(src)
     else:
+        # Back up an existing output before overwriting it (re-run safety).
+        if opts['update_existing'] and os.path.exists(dst):
+            try:
+                shutil.copy(dst, dst + '.bak.pptx')
+            except Exception:
+                pass
         shutil.copy(src, dst)
         prs = Presentation(dst)
 
@@ -659,6 +706,7 @@ def apply_to_deck(deck_info, captions, captioned_dir, audit_dir, style, opts):
     slide_h = prs.slide_height
     audit_rows = []
     n_caption_shapes_removed = 0
+    n_preserved_edits = 0
     spell_rows = []
     spell_seen = set()
     qc_rows = []
@@ -671,21 +719,30 @@ def apply_to_deck(deck_info, captions, captioned_dir, audit_dir, style, opts):
         # icon captions inherit the same footer clearance + obstacle list.
         footer_limit = _g_slide_footer_top(slide, slide_h)
         effective_footer_limit = footer_limit - FOOTER_CLEARANCE_EMU
-        title_rect = _g_slide_title_rect(slide)
-        body_bands = _g_body_bands(slide)
-        # v0.2.1 hardening: collect every picture's vertical band so a caption
+        # v0.2.3: EVERY non-empty text frame is a hard obstacle (title, body,
+        # AND plain text boxes / auto-shapes — the question/answer/label text the
+        # v0.2.2 model was blind to). A caption must never cover any of these.
+        text_rects = _g_text_rects(slide)
+        # v0.2.2: collect every picture's full (L,T,R,B) rect so a caption
         # for picture-N never lands inside picture-M on the same slide. The
         # caption's own picture is filtered out at use-time so it can still be
-        # placed adjacent to its own picture.
-        all_pic_bands: list[tuple[int, int, int]] = []  # (y_top, y_bottom, pic_id)
+        # placed adjacent to its own picture. (Upgraded from y-band to 2D so a
+        # caption beside a picture isn't falsely blocked.)
+        all_pic_rects: list[tuple[int, int, int, int, str]] = []  # (L,T,R,B,pic_id)
         for _pic_scan in iter_slide_pics(slide):
+            _o_left = _pic_scan.get('off_x')
             _o_top = _pic_scan.get('off_y')
+            _o_w   = _pic_scan.get('ext_cx')
             _o_h   = _pic_scan.get('ext_cy')
-            if _o_top is None or _o_h is None:
+            if None in (_o_left, _o_top, _o_w, _o_h):
                 continue
-            all_pic_bands.append((int(_o_top), int(_o_top) + int(_o_h),
+            all_pic_rects.append((int(_o_left), int(_o_top),
+                                  int(_o_left) + int(_o_w), int(_o_top) + int(_o_h),
                                   _pic_scan.get('pic_id', '')))
         # Per-slide accumulator for Fix-E (caption-caption overlap avoidance).
+        # Stores full (L,T,R,B) rects so clear_all_obstacles_2d reads them
+        # correctly (v0.2.1 stored (l,t,w,h), which the (L,T,R,B) obstacle test
+        # silently misread as a degenerate band — disabling cap-cap avoidance).
         # MUST reset here, at the top of each slide loop — not before, not inside pic loop.
         placed_caps: list[tuple[int, int, int, int]] = []
         if opts['spellcheck'] or opts['dateqc']:
@@ -698,7 +755,11 @@ def apply_to_deck(deck_info, captions, captioned_dir, audit_dir, style, opts):
         # Idempotency: if --update-existing AND not dry-run, strip any prior captioner shapes
         # on this slide before adding new ones.
         if opts['update_existing'] and not opts['dry_run']:
-            n_caption_shapes_removed += remove_previous_caption_shapes(slide)
+            _rm, _pres = remove_previous_caption_shapes(
+                slide, oracle=caption_oracle,
+                force_overwrite_edits=opts.get('force_overwrite_edits', False))
+            n_caption_shapes_removed += _rm
+            n_preserved_edits += _pres
             n_caption_shapes_removed += remove_previous_smartart_caption_shapes(slide)
             n_caption_shapes_removed += remove_previous_smartart_icon_caption_shapes(slide)
 
@@ -716,18 +777,12 @@ def apply_to_deck(deck_info, captions, captioned_dir, audit_dir, style, opts):
                         # v0.2.2: apply Fix-B (footer clearance) + Fix-D (widening)
                         # to the SmartArt-icon caption path so it inherits the same
                         # placement-quality guarantees as the main caption path.
-                        # Try below the icon first; if that would intrude the footer
-                        # clearance band, try above; clamp on-slide as last resort.
-                        below_ic_top = p['y'] + p['cy'] + icon_gap
-                        above_ic_top = max(0, p['y'] - icon_gap - icon_h)
-                        if below_ic_top + icon_h <= effective_footer_limit:
-                            ic_top = below_ic_top
-                        elif above_ic_top + icon_h <= p['y']:  # fits above icon
-                            ic_top = above_ic_top
-                        else:
-                            ic_top = max(0, effective_footer_limit - icon_h)
-                        # Fix-D: widen narrow icon-caption boxes to fit the label
-                        # text in ≤2 lines. Icons are typically <0.5" wide.
+                        # Fix-D FIRST: width determines wrap, which determines the
+                        # box's RENDERED height (auto_size grows it). Compute width,
+                        # then estimate height, so the footer math below uses the
+                        # height the box will actually occupy — not the nominal
+                        # 200k (a long label wrapping to 3 lines near the footer
+                        # otherwise grows down past it).
                         name_text = p['name'] or ''
                         ic_width = p['cx'] if p['cx'] >= 400000 else 400000
                         chars_per_line = max(6, ic_width // EMU_PER_CHAR_DEFAULT)
@@ -736,10 +791,44 @@ def apply_to_deck(deck_info, captions, captioned_dir, audit_dir, style, opts):
                                          (len(name_text) // 2 + 1) * EMU_PER_CHAR_DEFAULT)
                             ic_width = min(slide_w - p['x'], needed)
                         ic_left = max(0, min(p['x'], slide_w - ic_width))
-                        # Track this icon caption as an obstacle for subsequent
-                        # main-caption placements on the same slide.
-                        placed_caps.append((ic_left, ic_top, ic_width, icon_h))
-                        itb = slide.shapes.add_textbox(ic_left, ic_top, ic_width, icon_h)
+                        # Estimate rendered height from wrap (≈160k EMU/line at 8pt
+                        # + box margins); never less than the nominal icon_h.
+                        eff_cpl = max(6, ic_width // EMU_PER_CHAR_DEFAULT)
+                        est_lines = max(1, (len(name_text) + eff_cpl - 1) // eff_cpl)
+                        ic_h = max(icon_h, int(est_lines * 160000) + 30000)
+                        # Try below the icon first; if that would intrude the footer
+                        # clearance band, try above; clamp on-slide as last resort.
+                        below_ic_top = p['y'] + p['cy'] + icon_gap
+                        above_ic_top = max(0, p['y'] - icon_gap - ic_h)
+                        if below_ic_top + ic_h <= effective_footer_limit:
+                            ic_top = below_ic_top
+                        elif above_ic_top + ic_h <= p['y']:  # fits above icon
+                            ic_top = above_ic_top
+                        else:
+                            ic_top = max(0, effective_footer_limit - ic_h)
+                        # v0.2.2: guarantee footer safety regardless of branch.
+                        # An icon that itself sits in/below the footer band (a
+                        # SmartArt overflowing into the footer zone) would otherwise push its 'above'
+                        # caption into the band. Clamp the bottom to the limit.
+                        ic_top = min(ic_top, max(0, effective_footer_limit - ic_h))
+                        # v0.2.2 Fix-E for SmartArt icons: nudge the icon caption
+                        # DOWN past any already-placed caption it would overlap
+                        # (the v0.2.1 path placed every icon caption blindly,
+                        # producing stacks of 6+ overlapping boxes on icon-heavy
+                        # SmartArts). Cap the nudges so we never push past footer.
+                        ic_rect = (ic_left, ic_top, ic_left + ic_width, ic_top + ic_h)
+                        _tries = 0
+                        while (_tries < 8
+                               and not clear_all_obstacles_2d(ic_rect, placed_caps, vfrac=0.02)
+                               and (ic_top + ic_h + icon_gap + ic_h)
+                                   <= effective_footer_limit):
+                            ic_top = ic_top + ic_h + icon_gap
+                            ic_rect = (ic_left, ic_top, ic_left + ic_width, ic_top + ic_h)
+                            _tries += 1
+                        # Track this icon caption as an obstacle (full L,T,R,B
+                        # rect) for subsequent icon + main-caption placements.
+                        placed_caps.append((ic_left, ic_top, ic_left + ic_width, ic_top + ic_h))
+                        itb = slide.shapes.add_textbox(ic_left, ic_top, ic_width, ic_h)
                         try:
                             itb._element.nvSpPr.cNvPr.set('name', f"{SMARTART_ICON_SHAPE_NAME_PREFIX}{sa_idx}_{ic_idx}")
                         except Exception:
@@ -838,7 +927,7 @@ def apply_to_deck(deck_info, captions, captioned_dir, audit_dir, style, opts):
             p_height = pic['ext_cy']
             # Placeholder-hosted picture: geometry inherited from the layout.
             # Resolve it via the python-pptx placeholder, else the caption
-            # lands off-page at (0, 50000) ().
+            # lands off-page at (0, 50000) (a placeholder-geometry fallback).
             if (None in (p_left, p_top, p_width, p_height)
                     and pic.get('is_placeholder') and pic.get('ph_idx') is not None):
                 g = resolve_ph_geometry(slide, pic['ph_idx'])
@@ -853,19 +942,14 @@ def apply_to_deck(deck_info, captions, captioned_dir, audit_dir, style, opts):
                 p_top = p_top if p_top is not None else int(slide_h * 0.55)
 
             gap = opts['gap_emu']
-            c_height = opts['height_emu']
-            # Fix-D: width determination. Default = picture width, but widen if
-            # the caption text wouldn't fit in 2 lines at the picture's width.
-            # Never truncate text — widen the box up to slide_w - c_left.
+            # --- Width (Fix-D): default = picture width, widen if the caption
+            # wouldn't fit in ≤2 lines at that width. Never truncate. ---
             c_left = max(0, min(p_left, slide_w - 500000))
             base_width = min(p_width, slide_w - c_left)
             if base_width < 500000:
                 base_width = min(500000, slide_w)
-            # Estimate width needed so the caption fits on ≤2 lines.
             est_chars_per_line_at_base = max(10, base_width // EMU_PER_CHAR_DEFAULT)
-            widening_required = (len(caption) > 2 * est_chars_per_line_at_base)
-            if widening_required:
-                # Compute width that holds full caption in ≤2 lines, capped at slide width.
+            if len(caption) > 2 * est_chars_per_line_at_base:
                 needed = max(MIN_CAPTION_WIDTH_EMU,
                              (len(caption) // 2 + 1) * EMU_PER_CHAR_DEFAULT)
                 c_width = min(slide_w - c_left, needed)
@@ -873,114 +957,113 @@ def apply_to_deck(deck_info, captions, captioned_dir, audit_dir, style, opts):
                 c_width = base_width
             if c_left + c_width > slide_w:
                 c_left = max(0, slide_w - c_width)
-            overflow_after_widening = (
-                len(caption) > 2 * max(10, c_width // EMU_PER_CHAR_DEFAULT))
 
-            # Fix-B: ALL FOUR uses of footer_limit go through effective_footer_limit.
-            # See the placement audit — the v1 plan's 3-of-4 substitution
-            # caused forced_top to push the caption UP into the picture body.
+            # --- Rendered height estimate (v0.2.3). The caption box auto-sizes,
+            # so a 2-line caption occupies MORE than the nominal height. Use the
+            # estimate for every placement/overlap decision so a grown box never
+            # spills onto a neighbor (a grown label spilling onto its neighbor). ---
+            c_height = estimate_caption_height(caption, c_width,
+                                               nominal_emu=opts['height_emu'])
+
+            # --- Obstacles (v0.2.3). HARD obstacles a caption must NEVER cover:
+            # every text frame on the slide (title, body, AND plain text boxes /
+            # auto-shapes — the v0.2.2 model only saw placeholders) plus every
+            # OTHER picture. The caption's own picture is NOT a hard obstacle: a
+            # clean slot sits just outside it, and its bottom strip is an allowed
+            # last-resort band (covering a little image beats covering text). ---
+            # Exclude ONLY the caption's own picture from the obstacle set —
+            # matched by GEOMETRY, not pic_id. iter_slide_pics assigns the same
+            # pic_id (often 0) to multiple pictures on a slide, so a pic_id match
+            # wrongly drops a DIFFERENT picture from the obstacles and lets the
+            # caption land on it (a stacked-pictures bug). Geometry is
+            # unique per visible picture; if two pictures truly coincide, excluding
+            # both is harmless (they occupy the same space).
+            own_pic = (p_left, p_top, p_left + p_width, p_top + p_height)
+            other_pics = [(_l, _t, _r, _b) for _l, _t, _r, _b, _pid in all_pic_rects
+                          if (_l, _t, _r, _b) != own_pic]
+            # Two tolerances: a caption must BARELY touch text, let alone cover it
+            # (TEXT_VFRAC, near-zero) — but a small overlap with a picture's edge is
+            # visually fine (PIC_VFRAC). Clean candidates avoid even the own picture;
+            # the band (with_own_pic=False) deliberately sits in its own picture.
+            TEXT_VFRAC = 0.03
+            PIC_VFRAC = 0.15
+            CAP_VFRAC = 0.02
+
+            def _clears(left, top, height, width=None, with_own_pic=True):
+                ww = c_width if width is None else width
+                rect = (left, top, left + ww, top + height)
+                pics = other_pics + ([own_pic] if with_own_pic else [])
+                return (clear_all_obstacles_2d(rect, text_rects, vfrac=TEXT_VFRAC)
+                        and clear_all_obstacles_2d(rect, pics, vfrac=PIC_VFRAC)
+                        and clear_all_obstacles_2d(rect, placed_caps, vfrac=CAP_VFRAC))
+
+            # --- Clean external candidates, in preference order: below, then above. ---
             below_top = p_top + p_height + gap
             above_top = p_top - gap - c_height
-            below_ok = below_top + MIN_CAPTION_HEIGHT <= effective_footer_limit
-            below_h  = min(c_height, effective_footer_limit - below_top) if below_ok else 0
-            forced_h = max(MIN_CAPTION_HEIGHT,
-                           min(c_height,
-                               effective_footer_limit - p_top - p_height - gap))
-            forced_top = max(0, effective_footer_limit - forced_h)
+            cands = []
+            if below_top + c_height <= effective_footer_limit:
+                cands.append(('added', below_top))
+            if above_top >= 0:
+                cands.append(('fallback-above', above_top))
 
-            # Fix-C: deterministic no-clean-slot detection (replaces area-ratio).
-            # The picture leaves no clean slot above OR in the clean-below band
-            # → caption would be forced inside the picture body. SKIP placement
-            # and surface for human review via overlay-fullbleed audit row.
-            no_slot = (not below_ok) and (above_top < 0)
-            if no_slot:
-                cov = visible_coverage(p_left, p_top, p_width, p_height,
-                                       slide_w, slide_h)
+            pick = None  # (action, left, top, width, height)
+            for action_name, top in cands:
+                if _clears(c_left, top, c_height):
+                    pick = (action_name, c_left, top, c_width, c_height); break
+            if pick is None:
+                # Horizontal nudge of each clean candidate (re-test ALL obstacles).
+                for action_name, top in cands:
+                    for step in (c_width + gap, (c_width + gap) // 2 + gap):
+                        alt = c_left + step
+                        if alt + c_width <= slide_w and _clears(alt, top, c_height):
+                            pick = (action_name, alt, top, c_width, c_height); break
+                    if pick is not None:
+                        break
+            if pick is None:
+                # --- Bottom-of-picture band fallback (v0.2.3, user-approved):
+                # a caption in the bottom strip INSIDE its own picture beats
+                # covering surrounding text or skipping. CONSTRAIN the band to the
+                # own picture's WIDTH so it never spills into an adjacent picture/
+                # column (it grows TALLER instead) — the v0.2.3 grid-slide fix.
+                # It must still clear all text + other captions, overlapping only
+                # its own picture's bottom. ---
+                band_w = min(c_width, p_width) if (p_width and p_width >= 500000) else c_width
+                band_h = estimate_caption_height(caption, band_w,
+                                                 nominal_emu=opts['height_emu'])
+                band_left = max(0, min(p_left, slide_w - band_w))
+                # Bottom-align to the picture, but the footer-clearance cap always
+                # wins (a picture sitting low on the slide must not push its band
+                # into the footer band).
+                band_top = max(0, min(p_top + p_height - band_h,
+                                      effective_footer_limit - band_h))
+                if (band_left + band_w <= slide_w
+                        and _clears(band_left, band_top, band_h, width=band_w,
+                                    with_own_pic=False)):
+                    pick = ('inside-bottom', band_left, band_top, band_w, band_h)
+            if pick is None:
+                # Truly no slot that avoids text — SKIP + flag (never cover text).
                 audit_rows.append({
                     'slide': s_idx, 'pic_id': pic_id, 'image_hash': h,
                     'caption': caption, 'char_len': len(caption),
                     'in_group_depth': depth,
                     'action': f'{"dry-run-would-" if opts["dry_run"] else ""}'
-                              f'overlay-fullbleed',
-                    'visible_coverage': round(cov, 3),
+                              f'flagged-no-slot',
                 })
-                continue  # skip placement — no caption added to slide
+                continue
+            action, c_left, c_top, c_width, c_height = pick
+            is_band = (action == 'inside-bottom')
 
-            # Build candidates in preference order.
-            cands = []
-            if below_ok:
-                cands.append(('added', below_top, below_h))
-            if above_top >= 0:
-                cands.append(('fallback-above', above_top, c_height))
-            cands.append(('fallback-bottom', forced_top, forced_h))
-
-            # Fix-A + Fix-E merge: a single obstacle list. Caption must clear
-            # title + body/subtitle text shapes + previously-placed captions
-            # + every OTHER picture on this slide (so a caption for pic-N
-            # doesn't land inside pic-M on the same multi-picture slide).
-            obstacles = []
-            if title_rect is not None:
-                obstacles.append(title_rect)
-            obstacles.extend(body_bands)
-            obstacles.extend(placed_caps)
-            for _y_top, _y_bot, _pid in all_pic_bands:
-                if _pid == pic_id:
-                    continue  # skip the caption's own picture
-                obstacles.append((_y_top, _y_bot))
-
-            pick = next((c for c in cands
-                         if _clear_all_obstacles(c[1], c[2], obstacles)),
-                        None)
-            if pick is None:
-                # Fix-E: no candidate clears every obstacle. Try a horizontal
-                # nudge — sometimes the only conflict is with a previously
-                # placed caption on the same slide.
-                nudged = False
-                for c in cands:
-                    # Try shifting c_left right by c_width + gap; if that fits
-                    # on-slide and clears prior captions vertically, use it.
-                    alt_left = c_left + c_width + gap
-                    if alt_left + c_width <= slide_w:
-                        # Re-test only against placed_caps (title/body don't
-                        # care about horizontal — vertical-only check):
-                        if _clear_all_obstacles(c[1], c[2], placed_caps):
-                            c_left = alt_left
-                            pick = c
-                            nudged = True
-                            break
-                if pick is None:
-                    # Truly no slot. SKIP placement (NEVER silent cands[0]).
-                    audit_rows.append({
-                        'slide': s_idx, 'pic_id': pic_id, 'image_hash': h,
-                        'caption': caption, 'char_len': len(caption),
-                        'in_group_depth': depth,
-                        'action': f'{"dry-run-would-" if opts["dry_run"] else ""}'
-                                  f'flagged-no-slot',
-                    })
-                    continue
-            action, c_top, c_height = pick
-
-            # Emit OVERFLOW-RISK row if the caption still won't fit on ≤2 lines
-            # even after widening (informational; caption is still placed).
-            if overflow_after_widening:
-                audit_rows.append({
-                    'slide': s_idx, 'pic_id': pic_id, 'image_hash': h,
-                    'caption': caption, 'char_len': len(caption),
-                    'in_group_depth': depth,
-                    'action': 'overflow-risk-noted',
-                })
-
-            # Final hard clamp — fully on-slide, never negative or past footer.
-            c_top = max(0, min(c_top, slide_h - MIN_CAPTION_HEIGHT))
+            # Final hard clamp — fully on-slide, footer-safe (band keeps its top
+            # so it stays bottom-aligned to the picture).
+            c_top = max(0, min(c_top, slide_h - c_height))
             if c_top + c_height > slide_h:
                 c_height = max(MIN_CAPTION_HEIGHT, slide_h - c_top)
-            if c_top + c_height > effective_footer_limit:
-                c_height = max(MIN_CAPTION_HEIGHT,
-                               effective_footer_limit - c_top)
+            if not is_band and c_top + c_height > effective_footer_limit:
+                c_height = max(MIN_CAPTION_HEIGHT, effective_footer_limit - c_top)
 
-            # Fix-E: register this caption as an obstacle for subsequent pics
-            # on the SAME slide. Must happen for both dry-run and real apply.
-            placed_caps.append((c_left, c_top, c_width, c_height))
+            # Register this caption (full L,T,R,B rect, at its ESTIMATED grown
+            # size) as an obstacle for subsequent pictures on the same slide.
+            placed_caps.append((c_left, c_top, c_left + c_width, c_top + c_height))
 
             if opts['dry_run']:
                 audit_rows.append({
@@ -992,9 +1075,12 @@ def apply_to_deck(deck_info, captions, captioned_dir, audit_dir, style, opts):
 
             # Add the text box
             tb = slide.shapes.add_textbox(c_left, c_top, c_width, c_height)
-            # Idempotency: tag the shape name with our prefix + image hash
+            # Idempotency: tag the shape name with our prefix + image hash. Band
+            # captions get the band prefix so the audit/verify in-picture checks
+            # know their own-picture overlap is intentional (not a defect).
+            name_prefix = CAPTION_BAND_NAME_PREFIX if is_band else CAPTION_SHAPE_NAME_PREFIX
             try:
-                tb._element.nvSpPr.cNvPr.set('name', f"{CAPTION_SHAPE_NAME_PREFIX}{h}")
+                tb._element.nvSpPr.cNvPr.set('name', f"{name_prefix}{h}")
             except Exception:
                 pass  # if naming fails, the caption still renders correctly
 
@@ -1031,7 +1117,7 @@ def apply_to_deck(deck_info, captions, captioned_dir, audit_dir, style, opts):
         prs.save(dst)
     if audit_rows:
         # Dry-run writes its OWN file so it can never clobber a prior real
-        # apply audit ().
+        # apply audit.
         audit_name = f"{deck}_audit_dryrun.csv" if opts['dry_run'] else f"{deck}_audit.csv"
         csv_path = os.path.join(audit_dir, audit_name)
         # v0.2.1: union of keys across all rows — different audit-row types
@@ -1071,6 +1157,7 @@ def apply_to_deck(deck_info, captions, captioned_dir, audit_dir, style, opts):
     return {
         'deck': deck, 'dst': dst if not opts['dry_run'] else None,
         'rows': audit_rows, 'n_caption_shapes_removed': n_caption_shapes_removed,
+        'n_preserved_edits': n_preserved_edits,
         'spell_rows': spell_rows, 'qc_rows': qc_rows,
     }
 
@@ -1087,7 +1174,8 @@ def main():
     ap.add_argument('--italic', type=lambda v: v.lower() in ('1','true','yes','y'), default=True, help='Caption italic (default: true)')
     ap.add_argument('--gap-emu', type=int, default=50000, help='EMU between picture and caption (default: 50000 = ~0.05")')
     ap.add_argument('--height-emu', type=int, default=400000, help='Caption text box height in EMU (default: 400000 = ~0.44")')
-    ap.add_argument('--update-existing', action='store_true', help='Detect and remove previously-added captioner shapes before adding new ones (else re-runs DUPLICATE)')
+    ap.add_argument('--update-existing', action='store_true', help='Detect and remove previously-added captioner shapes before adding new ones (else re-runs DUPLICATE). Edit-aware: a caption whose text no longer matches the prior audit CSV is treated as an instructor hand-edit and is PRESERVED, not stripped.')
+    ap.add_argument('--force-overwrite-edits', action='store_true', help='With --update-existing, remove even captions that look instructor-edited (default: preserve them).')
     ap.add_argument('--no-smartart', action='store_true', help='Disable SmartArt captioning (SmartArt captions are auto-generated from diagram text content, on by default)')
     ap.add_argument('--quiet', action='store_true', help='Suppress per-deck progress lines')
     # QC is ON BY DEFAULT (spell-check + name-verify tagging + date/template QC).
@@ -1126,11 +1214,12 @@ def main():
     }
     sp_engine, sp_wl, sp_status = init_spellcheck(do_spell)
     # FAIL LOUD: spell-check is default-on; a missing optional dep must NOT
-    # silently no-op (). Captioning still
+    # silently no-op. Captioning still
     # proceeds, but we banner it, drop a marker, and exit non-zero.
     spellcheck_degraded = do_spell and sp_status == 'unavailable'
     opts = {
         'dry_run': args.dry_run, 'update_existing': args.update_existing,
+        'force_overwrite_edits': args.force_overwrite_edits,
         'gap_emu': args.gap_emu, 'height_emu': args.height_emu,
         'caption_smartart': not args.no_smartart,
         'spellcheck': do_spell and sp_status == 'ready',
@@ -1166,8 +1255,9 @@ def main():
               "qc/<deck>_qc.csv emitted ===")
 
     total_added = total_skipped = total_pics = total_removed = total_errored = 0
-    total_spell = total_qc = total_verify = 0
+    total_spell = total_qc = total_verify = total_preserved = 0
     decks_with_errors = []
+    action_counter = Counter()   # categorized coverage across all decks
     for i, (deck_name, deck_info) in enumerate(manifest.items(), 1):
         if 'error' in deck_info:
             total_errored += 1
@@ -1184,6 +1274,7 @@ def main():
                 print(f"[{i}/{len(manifest)}] {deck_name:<35} ERROR: {type(e).__name__}: {str(e)[:60]}")
             continue
         rows = result['rows']
+        action_counter.update(r['action'] for r in rows)
         added = sum(1 for r in rows if r['action'].startswith('added') or r['action'] in ('fallback-above','fallback-bottom') or r['action'].startswith('dry-run-would'))
         skipped = sum(1 for r in rows if r['action'].startswith('skipped'))
         if not args.quiet:
@@ -1193,6 +1284,7 @@ def main():
             print(f"[{i}/{len(manifest)}] {deck_name:<35} {added:>3}/{len(rows)} {verb}  {skipped:>3} skip{removed_note}  -> {dst_label}")
         total_added += added; total_skipped += skipped; total_pics += len(rows)
         total_removed += result['n_caption_shapes_removed']
+        total_preserved += result.get('n_preserved_edits', 0)
         sr = result.get('spell_rows', [])
         total_spell += len(sr)
         total_verify += sum(1 for r in sr if r.get('verify_name'))
@@ -1202,6 +1294,9 @@ def main():
     print(f"TOTAL: {total_added}/{total_pics} captions {'would be added (dry-run)' if args.dry_run else 'added'}, {total_skipped} skipped, {total_errored} deck-level errors")
     if total_removed:
         print(f"Prior captioner shapes removed (idempotency): {total_removed}")
+    if total_preserved:
+        print(f"Instructor-edited captions PRESERVED (not overwritten): {total_preserved} "
+              "— pass --force-overwrite-edits to replace them instead.")
     if opts['spellcheck']:
         print(f"Spell-check flags (review only, no edits made): {total_spell} "
               f"— see qc/<deck>_spellcheck.csv in {qc_dir}")
@@ -1222,6 +1317,45 @@ def main():
     print(f"Audit CSVs:      {audit_dir}")
     if do_spell or do_dateqc:
         print(f"QC CSVs:         {qc_dir}")
+
+    # ---- Categorized coverage report (v0.2.2) --------------------------------
+    # Separate a REAL accessibility gap ("no clean slot" — picture left
+    # uncaptioned) from a NON-gap (decorative / text-only SmartArt) so the
+    # operator can report coverage honestly instead of a single lumped "skipped".
+    def _sum(*prefixes_or_exact):
+        n = 0
+        for act, cnt in action_counter.items():
+            a = act.replace('dry-run-would-', '')
+            if a in prefixes_or_exact:
+                n += cnt
+        return n
+    placed = _sum('added', 'fallback-above', 'fallback-bottom', 'added-smartart-icon')
+    no_slot = _sum('overlay-fullbleed', 'flagged-no-slot')   # real WCAG gap
+    decorative = _sum('skipped-decorative')                   # not a gap
+    text_only_sa = _sum('skipped-smartart-text-only')         # not a gap (text already accessible)
+    errored_imgs = _sum('skipped-no-caption', 'skipped-linked-no-embed',
+                        'skipped-image-extract-failed')
+    cov_path = os.path.join(work, 'coverage_report.csv')
+    with open(cov_path, 'w', newline='') as f:
+        w = csv.writer(f)
+        w.writerow(['category', 'count', 'is_accessibility_gap', 'note'])
+        w.writerow(['captions_placed', placed, 'no', 'visible caption added'])
+        w.writerow(['no_clean_slot', no_slot, 'YES',
+                    'picture left uncaptioned — no clean placement; needs human review'])
+        w.writerow(['decorative', decorative, 'no', 'classified decorative — intentionally uncaptioned'])
+        w.writerow(['smartart_text_only', text_only_sa, 'no',
+                    'text-only SmartArt — text already in the accessible layer'])
+        w.writerow(['extract_or_link_error', errored_imgs, 'maybe',
+                    'image could not be read/hashed — inspect'])
+        for act, cnt in sorted(action_counter.items()):
+            w.writerow([f'raw:{act}', cnt, '', ''])
+    print(f"Coverage report: {cov_path}")
+    print(f"  captions placed: {placed} | no-clean-slot (REAL gap, flagged): {no_slot} "
+          f"| decorative: {decorative} | text-only SmartArt: {text_only_sa}"
+          + (f" | extract/link errors: {errored_imgs}" if errored_imgs else ""))
+    if no_slot:
+        print(f"  ⚠ Report to stakeholders: {no_slot} pictures have NO visible caption "
+              "(no clean placement slot) — see overlay-fullbleed/flagged-no-slot audit rows.")
     print(f"{'='*72}")
     if spellcheck_degraded:
         sys.exit(3)

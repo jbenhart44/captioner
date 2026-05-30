@@ -4,6 +4,38 @@ All notable changes to captioner are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.3] - 2026-05-29
+
+Minor release. Text-aware placement: captions are guaranteed never to cover text.
+
+### Added
+
+- **`TEXT-OVERLAP` is now a first-class placement check** in both the auditor and
+  `verify.py` (which gains a five-pattern gate: text-overlap, footer, in-picture,
+  caption-caption, missing-caption, with distinct non-zero exit codes).
+- **Bottom-of-picture band fallback** (`inside-bottom`): when no slot outside the
+  picture clears the surrounding text, the caption is placed in the picture's own
+  bottom strip (constrained to the picture width) rather than over text or skipped.
+
+### Fixed
+
+- **Captions no longer cover text in plain text boxes / auto-shapes.** The obstacle
+  model previously saw only placeholder text (title/body); it now treats *every*
+  text frame as a 2D obstacle. Obstacles are narrowed to each shape's estimated
+  visible-text region (anchor-aware) so a caption below a tall title's text is not
+  falsely blocked by the title's empty box.
+- **Auto-sized caption height is accounted for**, so a multi-line caption no longer
+  grows onto a neighbouring caption or label.
+- **The own picture is identified by geometry, not `pic_id`.** `iter_slide_pics`
+  can assign the same `pic_id` to multiple pictures on a slide, which previously let
+  a caption land inside a *different* picture stacked nearby.
+
+### Verification
+
+- Across a 49-deck production corpus: 0 text-overlap, 0 caption-in-picture, 0
+  caption-caption, 0 off-slide, 0 footer defects. Confirmed by an independent
+  adversarial cross-check using separate overlap math.
+
 ## [0.2.2] - 2026-05-19
 
 Patch release. One placement improvement on top of v0.2.1.

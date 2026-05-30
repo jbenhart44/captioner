@@ -135,6 +135,28 @@ Hard guarantees:
 - Read-only in `--dry-run` and normal mode alike.
 - **pyspellchecker is required for the default spell-check.** Missing it is a LOUD failure: banner + `qc/SPELLCHECK_NOT_RUN.txt` + **exit 3** (captions still applied). Use a Python with `pyspellchecker`, or pass `--no-spellcheck`/`--quick` to proceed deliberately without it.
 
+## Placement engine (text-aware 2D)
+
+A caption is **never** placed where it covers text. The placer treats as 2D obstacles
+every text frame on the slide — title, body, AND plain text boxes / auto-shapes — plus
+every other picture and every already-placed caption. Each obstacle is narrowed to its
+estimated **visible-text region** (anchor-aware), so a caption below a tall title's one
+line of text is not falsely blocked by the title's empty box. Placement order per picture:
+
+1. **Below** the picture (clean), then **above** it — each clearing all obstacles incl.
+   the picture's own box; a near-zero tolerance against other captions keeps cards from
+   touching; a horizontal nudge is tried before giving up.
+2. **Bottom-of-picture band** (`inside-bottom`) — if no clean external slot exists, the
+   caption is placed in the picture's own bottom strip (constrained to the picture width,
+   growing taller rather than spilling sideways). Covering a sliver of image beats text.
+3. **Skip + flag** (`flagged-no-slot`) only if even the band would cover text.
+
+Caption box height is estimated from the text + width (the box auto-sizes) and used for
+every placement/overlap/footer decision, so a grown caption never spills onto a neighbour.
+The own picture is matched by **geometry, not `pic_id`** (which can repeat across pictures).
+`verify.py` enforces five patterns — text-overlap (T), footer (B), in-picture (C; band/icon
+exempt), caption-caption (E), and missing captions — exiting non-zero on any defect.
+
 ## What this skill does NOT do
 - Write to the WCAG `descr` alt-text XML field (separate workflow).
 - Auto-correct spelling — the default QC only *reports* suspects (and web-verifies names before suggesting); it never rewrites slide or caption text.
@@ -170,7 +192,10 @@ To disable all SmartArt handling, pass `--no-smartart`.
 `action` values:
 - `added` — caption inserted below picture
 - `fallback-above` — caption placed above (no room below)
-- `fallback-bottom` — caption stuffed at slide bottom (no room above or below)
+- `fallback-bottom` — caption placed at slide bottom (footer-safe; no room above or below)
+- `inside-bottom` — caption placed in its own picture's bottom strip (no text-clear external slot existed)
+- `overlay-fullbleed` — SKIPPED: caption would land inside a picture; flagged for review
+- `flagged-no-slot` — SKIPPED: no position clears every obstacle without covering text; flagged
 - `dry-run-would-{added|fallback-above|fallback-bottom}` — what would happen in non-dry-run
 - `skipped-decorative` — caption value was `[decorative]`
 - `skipped-no-caption` — no entry in captions.json for this image
@@ -193,7 +218,7 @@ To disable all SmartArt handling, pass `--no-smartart`.
 | SmartArt frame, text-only | Skipped (no caption); slide text already accessible |
 | Caption on dark slide background | Caption sits in a white card (`--bg-color FFFFFF` default) with light gray border, so it's readable regardless of slide background |
 | Hidden shape (`cNvPr hidden="1"`) | Skipped — invisible shapes don't need visible captions |
-| Picture fills entire slide | Caption falls back to slide-bottom; logged as `fallback-bottom` |
+| Picture fills entire slide | No text-clear slot -> caption placed in the picture's bottom strip (`inside-bottom`) or skipped + flagged; never over text |
 | Re-run on `_captioned.pptx` output | Without `--update-existing`: duplicates captions. With: strips prior captioner shapes and re-adds. |
 | Re-run on source with prior captioner shapes | Same as above — captioner shapes carry name prefix `captioner_caption_<hash>` |
 | Multi-language slide text | Context extraction works; captions still emitted in English |

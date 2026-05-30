@@ -17,7 +17,7 @@ Captioner is a **Claude Code skill**. The caption-generation step uses Claude Co
 ```bash
 git clone https://github.com/jbenhart44/captioner.git
 cd captioner
-git checkout v0.2.2
+git checkout v0.2.3
 pip install -r requirements.txt
 bash install.sh
 ```
@@ -28,7 +28,7 @@ Then restart Claude Code and run:
 /captioner <path-to-.pptx-or-folder>
 ```
 
-> Prefer a versioned archive? Download the [v0.2.2 release](https://github.com/jbenhart44/captioner/releases/tag/v0.2.2) tarball instead of cloning.
+> Prefer a versioned archive? Download the [v0.2.3 release](https://github.com/jbenhart44/captioner/releases/tag/v0.2.3) tarball instead of cloning.
 
 ## Quick start
 
@@ -82,12 +82,12 @@ The full workflow (extract → read → caption → dry-run audit → apply → 
 2. **Category-aware prefixes** — distinguishes `Photo:`, `Illustration:`, `Diagram:`, `Chart:`, `Screenshot:`, `Logo:`, `Map:`, `Icon:` from visual context.
 3. **Vision reads in-image text** — reproduces typography rendered as part of an image (a warning sign, a code screenshot).
 4. **White-card background fill** — captions stay legible on any slide background, including dark section dividers.
-5. **Three positioning fallbacks** — below the picture by default; above, then slide-bottom; the chosen fallback is logged.
+5. **Text-aware 2D placement — captions never cover text.** Every text frame (title, body, plain text boxes) is a 2D obstacle the caption routes around: below the picture → above it → a band tucked into the picture's own bottom strip → otherwise the picture is left uncaptioned and flagged. Two captions never touch, a caption never lands inside a *different* picture, nothing intrudes the footer, and box height is sized to the rendered text so a label never spills onto its neighbor. The chosen placement is logged.
 6. **SmartArt per-icon captioning** — each embedded PowerPoint Icon gets its own caption from its SVG `id` metadata (no vision call).
 7. **Decorative-image triage** — repeating logos and bullet markers are flagged `[decorative]` and skipped.
 8. **Text-only SmartArt skip** — diagrams whose only content is text labels are intentionally not captioned.
 9. **Deck-level context** — a free-text context string biases caption vocabulary toward the subject.
-10. **Audit CSV trail** — every action (`added`, `fallback-above`, `fallback-bottom`, `skipped-decorative`, `added-smartart-icon`, `skipped-smartart-text-only`, …) is logged.
+10. **Audit CSV trail** — every action (`added`, `fallback-above`, `inside-bottom`, `overlay-fullbleed`, `flagged-no-slot`, `skipped-decorative`, `added-smartart-icon`, `skipped-smartart-text-only`, …) is logged.
 11. **Idempotent re-runs** — captioner shapes carry a content-hash name; `--update-existing` regenerates cleanly with no duplicates.
 
 ## What captioner does NOT do
@@ -99,7 +99,7 @@ The full workflow (extract → read → caption → dry-run audit → apply → 
 
 ## Track record
 
-1,132 captions across 32 PowerPoint decks in three graduate engineering courses (Summer 2026). Source decks preserved unmodified; every run produces a reproducible per-deck audit CSV.
+953 captions across 49 PowerPoint decks in three graduate engineering courses (Summer 2026). A five-pattern verification gate (text-overlap, footer, in-picture, caption-caption, missing-caption) runs on every deck and the full corpus passes; an independent adversarial cross-check confirmed zero captions covering visible text. Source decks preserved unmodified; every run produces a reproducible per-deck audit CSV.
 
 ## License
 
@@ -112,7 +112,7 @@ MIT — see [`LICENSE`](LICENSE). Copyright (c) 2026 Jake Benhart.
   author  = {Benhart, Jake},
   title   = {Captioner: pedagogical-clarity captions for PowerPoint decks},
   year    = {2026},
-  version = {0.2.2},
+  version = {0.2.3},
   url     = {https://github.com/jbenhart44/captioner}
 }
 ```
