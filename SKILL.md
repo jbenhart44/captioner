@@ -111,6 +111,7 @@ Tell the user:
 | `--height-emu` | 400000 | Caption box height (~0.44") |
 | `--update-existing` | off | Strip prior captioner shapes before adding new ones (idempotent re-run) |
 | `--no-smartart` | off | Disable SmartArt icon captioning (on by default; auto-extracts icon names from SVG metadata) |
+| `--bg-repeat-threshold` | 4 | An identical image on ≥ N slides is a repeated background — not captioned and not a placement obstacle (`0` disables) |
 | `--quiet` | off | Suppress per-deck progress |
 | `--quick` | off | **Captioning ONLY** — skip ALL QC (spell-check + date/template scan) |
 | `--no-spellcheck` | off | Disable just the spell-check pass (date/template QC still runs) |
@@ -139,17 +140,25 @@ Hard guarantees:
 
 A caption is **never** placed where it covers text. The placer treats as 2D obstacles
 every text frame on the slide — title, body, AND plain text boxes / auto-shapes — plus
-every other picture and every already-placed caption. Each obstacle is narrowed to its
-estimated **visible-text region** (anchor-aware), so a caption below a tall title's one
-line of text is not falsely blocked by the title's empty box. Placement order per picture:
+every other (non-background) picture and every already-placed caption. Each obstacle is
+narrowed to its estimated **visible-text region**, sized **font- and line-break-aware**
+(explicit `\n`/`\x0b` breaks and the actual font size are counted), so a multi-line or
+large-font title is covered correctly — while a caption below a tall title's single line
+of text is still not falsely blocked by the title's empty box. Placement order per picture:
 
-1. **Below** the picture (clean), then **above** it — each clearing all obstacles incl.
-   the picture's own box; a near-zero tolerance against other captions keeps cards from
-   touching; a horizontal nudge is tried before giving up.
-2. **Bottom-of-picture band** (`inside-bottom`) — if no clean external slot exists, the
-   caption is placed in the picture's own bottom strip (constrained to the picture width,
-   growing taller rather than spilling sideways). Covering a sliver of image beats text.
-3. **Skip + flag** (`flagged-no-slot`) only if even the band would cover text.
+1. **Below** the picture (clean external slot) — clears all obstacles incl. the picture's
+   own box; a near-zero tolerance against other captions keeps cards from touching.
+2. **Small bottom-of-picture band** (`inside-bottom`) — preferred over above/beside so the
+   caption stays *with* its picture rather than drifting up into title/body text. The band
+   renders small (`BAND_FONT_PT`) — a thin strip overlapping a sliver of image — which also
+   lets it fit tight spots a full-size caption can't. Skipped for a small/structural picture
+   where a band would bury its content.
+3. **Above / beside** the picture — last resort before skipping (with a horizontal nudge).
+4. **Skip + flag** (`flagged-no-slot`) only if even the small band would cover text.
+
+A **repeated background** (the same image hash on ≥ `--bg-repeat-threshold` slides — a
+full-slide template texture) is detected, left uncaptioned, AND excluded from the picture-
+obstacle set, so it never blocks the real pictures on those slides.
 
 Caption box height is estimated from the text + width (the box auto-sizes) and used for
 every placement/overlap/footer decision, so a grown caption never spills onto a neighbour.
@@ -175,7 +184,7 @@ PowerPoint SmartArt diagrams are NOT `MSO_SHAPE_TYPE.PICTURE` shapes — they ar
 PowerPoint Icons store their human-readable name in the SVG `id` attribute on the root element, e.g. `<svg id="Icons_Checkmark">`, `<svg id="Icons_VideoCamera">`. The captioner walks the slide's `diagramDrawing` part rels, for each `<dsp:sp>` finds the `<asvg:svgBlip r:embed=rIdN>` extension (NOT `<a:blip>` — that points at the PNG fallback, which has no name), parses the SVG's `id`, and converts CamelCase → space-separated lowercase. So `Icons_VideoCamera` becomes the caption `video camera`.
 
 ### Caption style for icons
-1-3 words, lowercase, no "icon" suffix. Placed in a small white card directly under the icon's bounding box.
+1-3 words, lowercase, no "icon" suffix. Placed in a small white card directly under the icon's bounding box. **Icon-proportional sizing:** the font scales with the icon (5pt for tiny icons, up to 8pt) and the box hugs the text (width capped near the icon, height sized to the wrapped line count), so a caption never dwarfs a small icon. If an icon caption cannot be placed without overlapping another caption (e.g. a dense, near-footer icon strip), it is skipped + flagged rather than overlapped.
 
 ### Audit actions for SmartArt
 | Action | Meaning |
@@ -198,6 +207,7 @@ To disable all SmartArt handling, pass `--no-smartart`.
 - `flagged-no-slot` — SKIPPED: no position clears every obstacle without covering text; flagged
 - `dry-run-would-{added|fallback-above|fallback-bottom}` — what would happen in non-dry-run
 - `skipped-decorative` — caption value was `[decorative]`
+- `skipped-decorative-background` — SKIPPED: a repeated background/template image (same hash on ≥ `--bg-repeat-threshold` slides); not captioned and not treated as a placement obstacle
 - `skipped-no-caption` — no entry in captions.json for this image
 - `skipped-image-extract-failed` — python-pptx could not read the image blob
 - `added-smartart-icon` — per-icon caption inserted under a SmartArt icon (auto-generated from SVG metadata)

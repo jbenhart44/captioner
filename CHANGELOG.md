@@ -4,6 +4,36 @@ All notable changes to captioner are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.4] - 2026-05-30
+
+Minor release. Smarter, smaller, less intrusive placement — captions stay with their picture and never dwarf or drift over content.
+
+### Added
+
+- **Repeated-background suppression** (`--bg-repeat-threshold`, default 4): an identical
+  image appearing on N+ slides (a full-slide template texture) is detected, left
+  uncaptioned, AND excluded from the placement-obstacle set — so a full-bleed background
+  no longer blocks the real pictures on those slides.
+- **Icon-proportional SmartArt captions**: the icon-caption font scales with the icon
+  (5pt for tiny icons up to 8pt) and the box hugs the text, so a caption never dwarfs a
+  small icon. Icon captions skip + flag rather than overlap a neighbour on dense strips.
+- **Small in-picture band captions** (`BAND_FONT_PT`): the bottom-of-picture band renders
+  small (a thin strip), overlapping as little image as possible and fitting tight spots.
+
+### Changed
+
+- **Placement order** is now below → small in-picture band → above/beside → skip. The band
+  is preferred over above/beside so the caption stays *with* its picture instead of drifting
+  up into title/body text.
+
+### Fixed
+
+- **Text-obstacle sizing is font- and line-break-aware.** The visible-text region of a
+  title/text box now counts explicit line breaks and scales by font size, so a multi-line
+  or large-font title is covered correctly instead of being under-measured as one line
+  (which previously let a caption land on a title's lower lines). `verify.py` uses the same
+  sizing, so the gate enforces it.
+
 ## [0.2.3] - 2026-05-29
 
 Minor release. Text-aware placement: captions are guaranteed never to cover text.

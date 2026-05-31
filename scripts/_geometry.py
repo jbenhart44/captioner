@@ -187,14 +187,26 @@ def _visible_text_rect(sh):
     l, t, w, hgt = int(sh.left), int(sh.top), int(sh.width), int(sh.height)
     try:
         tf = sh.text_frame
-        cpl = max(8, w // EMU_PER_CHAR_DEFAULT)
+        # Font-aware line counting. A fixed 10pt char width badly under-counts
+        # lines for large fonts (a 37pt title wraps in ~1/4 the chars), and
+        # paragraphs carry explicit line breaks (\n, and \x0b/\v for a soft
+        # Shift+Enter break) that must each start a new visual line. Under-counting
+        # lines shrinks the obstacle so a caption lands on the title's 2nd line.
+        sizes = [r.font.size.pt for para in tf.paragraphs for r in para.runs
+                 if r.font.size is not None]
+        font_pt = max(sizes) if sizes else 18.0
+        char_w = max(1.0, font_pt * _EM_FRACTION * _EMU_PER_PT)
+        cpl = max(4, int(w / char_w))
         lines = 0
         for para in tf.paragraphs:
             txt = (para.text or '')
-            if txt.strip():
-                lines += max(1, (len(txt) + cpl - 1) // cpl)
+            if not txt.strip():
+                continue
+            for seg in txt.replace('\x0b', '\n').replace('\v', '\n').split('\n'):
+                lines += max(1, (len(seg) + cpl - 1) // cpl) if seg.strip() else 1
         lines = max(1, lines)
-        vis_h = min(hgt, lines * 235_000 + 60_000)  # ~0.26in/line + padding
+        line_emu = int(font_pt * 1.3 * _EMU_PER_PT)  # font-scaled line height
+        vis_h = min(hgt, lines * line_emu + 40_000)  # + small padding
         anchor = None
         try:
             anchor = tf.vertical_anchor  # MSO_ANCHOR or None (None ~ top)
@@ -356,6 +368,69 @@ def rect_intersect_area(a, b):
     ix = max(0, min(ax + aw, bx + bw) - max(ax, bx))
     iy = max(0, min(ay + ah, by + bh) - max(ay, by))
     return ix * iy
+
+
+# ---------------------------------------------------------------------------
+# v0.2.4 — text-overflow + structural-picture-coverage detection.
+# A single word cannot wrap, so a caption box narrower than its longest word
+# overflows horizontally. Char width uses a conservative em-fraction LOWER bound
+# (0.50 of font size) so the check never under-reports. Icon captions render at
+# 8pt / 20000-EMU side margins; regular + band captions at 10pt / 50000.
+# ---------------------------------------------------------------------------
+_EMU_PER_PT = 12700.0
+_EM_FRACTION = 0.50
+
+def _char_w(is_icon, font_pt=None):
+    # font_pt overrides the nominal size — used when an icon caption is scaled
+    # DOWN to match a small icon (so the width math tracks the real glyph size).
+    pt = font_pt if font_pt else (8.0 if is_icon else 10.0)
+    return pt * _EM_FRACTION * _EMU_PER_PT  # 50800 @8pt, 63500 @10pt
+
+def required_caption_width(text, is_icon=False, headroom=1.20, font_pt=None):
+    """Box width (EMU) that comfortably fits the longest single word on one line.
+    `_char_w` is a deliberate LOWER bound (0.50 em); real italic glyphs run wider,
+    so SIZING adds `headroom` (default +20%) above the detection threshold — the
+    box ends up comfortably wider than the word, not exactly at the edge. The
+    `caption_overflows` gate keeps using the bare bound so it never false-flags.
+    `font_pt` lets a down-scaled icon caption size its box to the smaller glyphs."""
+    words = (text or "").split()
+    if not words:
+        return 0
+    ml = 20000 if is_icon else 50000
+    return int(max(len(w) for w in words) * _char_w(is_icon, font_pt) * headroom + 2 * ml)
+
+def caption_overflows(text, box_width, is_icon=False, font_pt=None):
+    """True if the longest word in `text` cannot fit on one line in `box_width`
+    (horizontal overflow — the box must be widened or the caption shortened).
+    `font_pt` must match the caption's actual rendered size so the gate agrees
+    with how the box was sized in apply (else a down-scaled icon false-flags)."""
+    words = (text or "").split()
+    if not words:
+        return False
+    ml = 20000 if is_icon else 50000
+    return max(len(w) for w in words) * _char_w(is_icon, font_pt) > (box_width - 2 * ml)
+
+def band_covers_structural_picture(cap_ltrb, pic_ltrb):
+    """True if a bottom-band caption AT (cap_ltrb) over picture (pic_ltrb) is
+    AT-RISK of burying meaningful picture content — i.e. the picture is small,
+    thin, or a tall-narrow structural column (numbered chevron / icon / banner),
+    as opposed to a large photo where a thin bottom strip is harmless. Thresholds
+    from the 49-deck corpus scan (2026-05-30)."""
+    pw = pic_ltrb[2] - pic_ltrb[0]
+    ph = pic_ltrb[3] - pic_ltrb[1]
+    if pw <= 0 or ph <= 0:
+        return False
+    frac_h = (cap_ltrb[3] - cap_ltrb[1]) / ph
+    inch = 914400.0
+    min_edge = min(pw, ph)
+    ar = pw / ph
+    if frac_h > 0.40:
+        return True
+    if min_edge < 1.6 * inch and frac_h > 0.25:
+        return True
+    if ar < 0.85 and ph < 2.5 * inch and frac_h > 0.25:
+        return True
+    return False
 
 
 # ---------------------------------------------------------------------------

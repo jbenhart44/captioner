@@ -35,10 +35,12 @@ from _oxml_pics import iter_slide_pics, resolve_blob, guess_ext
 from _geometry import (
     slide_footer_top, slide_text_obstacle_rects,
     FOOTER_CLEARANCE_EMU, rect_intersect_area, CAPTION_NAME_PREFIXES,
+    caption_overflows, band_covers_structural_picture,
 )
 
 SA_ICON_PREFIX = 'captioner_sa_icon_'
 BAND_PREFIX = 'captioner_capband_'   # caption deliberately in own-picture bottom strip
+BG_REPEAT_THRESHOLD = 4              # must match apply_captions --bg-repeat-threshold default
 
 
 def load_known_skips(audit_dir, deck_stem):
@@ -53,7 +55,9 @@ def load_known_skips(audit_dir, deck_stem):
         with open(p, encoding="utf-8", newline="") as f:
             for row in csv.DictReader(f):
                 act = row.get("action", "")
-                if "overlay-fullbleed" in act or "flagged-no-slot" in act:
+                if ("overlay-fullbleed" in act or "flagged-no-slot" in act
+                        or "flagged-self-check" in act
+                        or "skipped-decorative-background" in act):
                     h = row.get("image_hash", "")
                     if h:
                         skips.add(h)
@@ -63,14 +67,31 @@ def load_known_skips(audit_dir, deck_stem):
 
 
 def caption_shapes(slide):
-    """Yield (shape_name, (left, top, width, height)) for every caption-named shape."""
+    """Yield (shape_name, (left, top, width, height), text, font_pt) for every
+    caption-named shape. font_pt is the first run's size in points (or None) so
+    the overflow gate can use the caption's ACTUAL rendered size — icon captions
+    are scaled 6–8pt by apply, and an 8pt assumption would false-flag them."""
     for sh in slide.shapes:
         nm = sh.name or ""
         if not any(nm.startswith(p) for p in CAPTION_NAME_PREFIXES):
             continue
         if None in (sh.left, sh.top, sh.width, sh.height):
             continue
-        yield nm, (int(sh.left), int(sh.top), int(sh.width), int(sh.height))
+        txt = ""
+        fpt = None
+        try:
+            if getattr(sh, "has_text_frame", False):
+                txt = sh.text_frame.text
+                for para in sh.text_frame.paragraphs:
+                    for run in para.runs:
+                        if run.font.size is not None:
+                            fpt = run.font.size.pt
+                            break
+                    if fpt is not None:
+                        break
+        except Exception:
+            pass
+        yield nm, (int(sh.left), int(sh.top), int(sh.width), int(sh.height)), txt, fpt
 
 
 def _overlaps_2d(cap_ltwh, obs_ltrb, vfrac=0.15):
@@ -96,18 +117,35 @@ def main():
     audit_dir = os.path.join(work, "audit")
 
     print(f"{'Deck':<34}{'Pics':>5}{'Cap':>4}{'Skp':>4}"
-          f"{'T':>3}{'B':>3}{'C':>3}{'E':>3}{'Miss':>5}{'OK':>5}")
+          f"{'T':>3}{'B':>3}{'C':>3}{'E':>3}{'O':>3}{'P':>3}{'Miss':>5}{'OK':>5}")
     print("=" * 79)
 
-    grand = {"decks": 0, "T": 0, "B": 0, "C": 0, "E": 0,
+    grand = {"decks": 0, "T": 0, "B": 0, "C": 0, "E": 0, "O": 0, "P": 0,
              "text_miss": 0, "skips": 0, "unhashable": 0}
     for path in sorted(glob.glob(os.path.join(captioned_dir, "*_captioned.pptx"))):
         deck = os.path.basename(path).replace("_captioned.pptx", "")
         known_skip = load_known_skips(audit_dir, deck)
         prs = Presentation(path)
         H = prs.slide_height
+        # v0.2.5: repeated-background hashes (same image on >= BG_REPEAT_THRESHOLD
+        # slides) are NOT picture obstacles — apply lets captions sit over a
+        # full-bleed background, so verify must exclude them from the Pattern C/P
+        # "inside a picture" set or it false-flags every such caption. Mirrors the
+        # bg_hashes pre-pass in apply_captions.apply_to_deck.
+        _bg_slidecount = {}
+        for _si, _sl in enumerate(prs.slides):
+            for _p in iter_slide_pics(_sl):
+                if _p["rid"] is None:
+                    continue
+                try:
+                    _hh = hashlib.sha256(resolve_blob(_sl, _p["rid"])).hexdigest()[:12]
+                except Exception:
+                    continue
+                _bg_slidecount.setdefault(_hh, set()).add(_si)
+        bg_hashes_v = {h for h, s in _bg_slidecount.items()
+                       if len(s) >= BG_REPEAT_THRESHOLD}
         total_pics = total_match = 0
-        t_fail = b_fail = c_fail = e_fail = skip_known = unhashable = 0
+        t_fail = b_fail = c_fail = e_fail = o_fail = p_fail = skip_known = unhashable = 0
         not_captioned = 0   # decorative or absent-from-captions.json — not a miss
         for slide in prs.slides:
             flim = slide_footer_top(slide, H, exclude_caption_shapes=True)
@@ -133,7 +171,7 @@ def main():
                     continue
                 ox, oy, cx, cy = (pic.get("off_x"), pic.get("off_y"),
                                   pic.get("ext_cx"), pic.get("ext_cy"))
-                if None not in (ox, oy, cx, cy):
+                if None not in (ox, oy, cx, cy) and h not in bg_hashes_v:
                     slide_pic_rects.append((int(ox), int(oy), int(cx), int(cy)))
                 key = f"{deck}/{h}.{ext}"
                 expected = captions.get(key)
@@ -146,11 +184,28 @@ def main():
                 if expected in textboxes:
                     total_match += 1
 
-            # Collect caption shapes once, then run all five coordinate checks.
+            # Collect caption shapes once, then run all coordinate checks.
             caps = list(caption_shapes(slide))
-            for nm, (cl, ct, cw, ch) in caps:
+            for nm, (cl, ct, cw, ch), txt, fpt in caps:
                 is_sa_icon = nm.startswith(SA_ICON_PREFIX)
                 is_band = nm.startswith(BAND_PREFIX)
+                # Pattern O (v0.2.4): a single word wider than the box -> overflow.
+                # Use the caption's real font size (fpt) so a down-scaled icon
+                # caption is measured at its actual size, not a fixed 8pt.
+                if caption_overflows(txt, cw, is_icon=is_sa_icon, font_pt=fpt):
+                    o_fail += 1
+                # Pattern P (v0.2.4): a band caption burying a small/structural picture.
+                if is_band:
+                    _cap_ltrb = (cl, ct, cl + cw, ct + ch)
+                    _best = None; _bov = 0
+                    for pr in slide_pic_rects:
+                        _ov = rect_intersect_area((cl, ct, cw, ch), pr)
+                        if _ov > _bov:
+                            _bov = _ov; _best = pr
+                    if _best is not None and _bov > 0:
+                        _pic_ltrb = (_best[0], _best[1], _best[0] + _best[2], _best[1] + _best[3])
+                        if band_covers_structural_picture(_cap_ltrb, _pic_ltrb):
+                            p_fail += 1
                 # Pattern T: caption overlaps ANY text frame (title/body/text box)
                 # by >5% of the caption's area. Applies to every caption, INCLUDING
                 # band captions (a band may sit in a picture but must never cover text).
@@ -186,24 +241,25 @@ def main():
                         - unhashable - not_captioned)
         n_caps = sum(1 for _ in
                      (c for s in prs.slides for c in caption_shapes(s)))
-        ok = "✓" if (t_fail == b_fail == c_fail == e_fail == 0
+        ok = "✓" if (t_fail == b_fail == c_fail == e_fail == o_fail == p_fail == 0
                      and text_miss == 0) else "✗"
         print(f"{deck[:33]:<34}{total_pics:>5}{n_caps:>4}{skip_known:>4}"
-              f"{t_fail:>3}{b_fail:>3}{c_fail:>3}{e_fail:>3}"
+              f"{t_fail:>3}{b_fail:>3}{c_fail:>3}{e_fail:>3}{o_fail:>3}{p_fail:>3}"
               f"{text_miss:>5}{ok:>5}")
         grand["decks"] += 1
         for k, v in (("T", t_fail), ("B", b_fail), ("C", c_fail),
+                     ("O", o_fail), ("P", p_fail),
                      ("E", e_fail), ("text_miss", text_miss),
                      ("skips", skip_known), ("unhashable", unhashable)):
             grand[k] += v
 
     print("=" * 79)
     print(f"TOTAL: {grand['decks']} decks | "
-          f"T(text-overlap)={grand['T']} B(footer)={grand['B']} "
+          f"T(text-overlap)={grand['T']} B(footer)={grand['B']} O(overflow)={grand['O']} P(covers-pic)={grand['P']} "
           f"C(in-pic)={grand['C']} E(cap-cap)={grand['E']} | "
           f"text-miss={grand['text_miss']} | known-skips={grand['skips']} | "
           f"unhashable={grand['unhashable']}")
-    placement_fail = any(grand[k] for k in ("T", "B", "C", "E"))
+    placement_fail = any(grand[k] for k in ("T", "B", "C", "E", "O", "P"))
     if grand["text_miss"] > 0:
         sys.exit(5)
     sys.exit(4 if placement_fail else 0)
