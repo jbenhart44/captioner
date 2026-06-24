@@ -4,6 +4,31 @@ All notable changes to captioner are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.5] - 2026-06-24
+
+Minor release. A per-slide correction tool closes the review loop: after a deck is captioned, a reviewer's plain-language notes ("slide 5's box is too big", "slide 12's caption overlaps the photo", "slide 3's caption is wrong") become surgical, in-place edits.
+
+### Added
+
+- **`fix_captions.py` — per-slide, in-place corrections.** Edits ONLY the named caption
+  shapes on the named slides — no re-extract, no re-reading images, no re-captioning the
+  rest of the deck. Backs the deck up to `<deck>.pptx.bak.pptx` before the first write.
+  Four families of fix: **resize** (`--shrink-box`, `--height`/`--width`), **reposition**
+  (`--move below|above|left|right|bottom`, `--nudge-x/-y`), **restyle** (`--font-size`,
+  `--font-color`, `--italic`, `--font-name`, `--bg-color`, `--border-color`), and **retext**
+  (`--text`). Multiple `--slide N` groups run in one command; target a specific caption with
+  `--which N` or `--hash`.
+- **Defect-checked corrections.** Every geometry change is re-checked against the same 2D
+  obstacle model the placer and `verify.py` use; a change that would create a defect is
+  refused and reported (override with `--force`). `--dry-run` previews; `--verify` re-scans
+  the saved deck and exits 4 if any placement defect remains.
+- **100% transparent caption card** via `--bg-color ""` / `--border-color ""` — both the
+  fill and the border become a true `noFill` (not white), for slides where the card clashes
+  with the background.
+- **Documented iteration loop** in `SKILL.md`: a "review note → fix" table and the
+  preview → apply → re-verify cycle, including the limits that need a manual slide edit
+  (image-baked text, caption correctness, pictures with no clean slot).
+
 ## [0.2.4] - 2026-05-30
 
 Minor release. Smarter, smaller, less intrusive placement — captions stay with their picture and never dwarf or drift over content.
@@ -200,6 +225,9 @@ captions over 32 PowerPoint decks in three graduate engineering courses.
   workflow for WCAG 2.1 AA conformance.
 - `.ppt` legacy format is not supported (python-pptx handles `.pptx` only).
 
+[0.2.5]: https://github.com/jbenhart44/captioner/releases/tag/v0.2.5
+[0.2.4]: https://github.com/jbenhart44/captioner/releases/tag/v0.2.4
+[0.2.3]: https://github.com/jbenhart44/captioner/releases/tag/v0.2.3
 [0.2.2]: https://github.com/jbenhart44/captioner/releases/tag/v0.2.2
 [0.2.1]: https://github.com/jbenhart44/captioner/releases/tag/v0.2.1
 [0.2.0]: https://github.com/jbenhart44/captioner/releases/tag/v0.2.0

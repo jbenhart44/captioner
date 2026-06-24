@@ -90,6 +90,78 @@ Tell the user:
 - Edge cases (fallback-above, fallback-bottom counts)
 - Output paths
 
+### Step 8 — Per-slide corrections (review loop, `fix_captions.py`)
+After a deck is delivered, whoever reviews it will spot per-slide issues — *"slide 5's caption box is too big"*, *"slide 12's caption overlaps the photo, move it below"*, *"slide 3's caption is wrong"*. `fix_captions.py` applies those fixes **in place, by slide number**, editing ONLY the named caption shapes — no re-extract, no re-read of images, no re-caption of the rest of the deck. It backs up the deck to `<deck>.pptx.bak.pptx` before the first write.
+
+```bash
+python3 scripts/fix_captions.py <deck_captioned.pptx> \
+  --slide 5  --shrink-box \
+  --slide 12 --move below \
+  --slide 3  --font-size 8 --font-color 222222 \
+  --slide 7  --text "Photo: solar farm at dusk" \
+  --verify
+```
+
+Each `--slide N` opens a fresh correction group; its flags reset at the next `--slide`, so groups are independent. The four families of fix:
+
+| Fix | Flags |
+|---|---|
+| **Resize** (box too big/small) | `--shrink-box` (fit to text) · `--height EMU` / `--height-in INCHES` · `--width EMU` / `--width-in INCHES` |
+| **Reposition** (wrong spot / overlap) | `--move {below\|above\|left\|right\|bottom}` (re-placed cleanly next to its own picture) · `--nudge-x EMU` / `--nudge-y EMU` (relative; +y = down) |
+| **Restyle** (font too big / wrong color) | `--font-size PT` · `--font-color HEX` · `--italic {true\|false}` · `--font-name NAME` · `--bg-color HEX` (`""`=transparent) · `--border-color HEX` (`""`=off) |
+| **Retext** (wrong/bad caption) | `--text "new wording"` |
+
+Target selection when a slide has more than one caption: `--which N` (1-based, top-to-bottom) or `--hash HEX` (the image hash in the caption's shape name). Default = every caption on the slide.
+
+**Safety:** every geometry change (resize/move/nudge) is re-checked against the SAME 2D obstacle model the placer and `verify.py` use (title/body text, other pictures, other captions, footer, off-slide). A fix that would CREATE a defect is **refused and reported** — pass `--force` to apply it anyway, or `--dry-run` to preview every group without writing. `--verify` re-scans the saved deck and exits 4 if any caption placement defect remains. **Exit codes:** `0` clean · `4` a fix was refused (would create/leave a defect) or `--verify` found a defect · `2` usage/IO/no-matching-caption. Retext/restyle-only changes don't move the box, so they're never refused on geometry.
+
+### The iteration loop — from "this caption looks wrong" to a clean fix
+The tool is built to be driven from plain-language review notes. The reviewer reads the
+delivered deck, writes down each problem **by slide number**, and you translate the note
+into one `--slide` group. Always work the loop the same way:
+
+1. **Preview, don't commit blind.** Run the fix with `--dry-run` first. It prints, per
+   group, exactly what would change and — for any geometry change — whether the new
+   position would create a defect. Nothing is written.
+2. **Apply.** Drop `--dry-run`; the deck is backed up to `<deck>.pptx.bak.pptx` and saved.
+3. **Re-verify.** Add `--verify` (or run `verify.py`) so the saved deck is re-scanned for
+   placement defects before you hand it back. A clean exit (0) means ship it.
+4. **If a fix is refused** (exit 4: it would create a text/photo/caption overlap), the tool
+   tells you which defect. Adjust the note — e.g. switch `--move below` to `--move right`,
+   or pair a `--shrink-box` with the move so the smaller box fits — and re-run. Use
+   `--force` only when you have *looked at the slide* and decided the overlap is acceptable.
+5. **Iterate until `--verify` is clean.** Multiple review notes go in ONE command as
+   multiple `--slide` groups; re-running is safe and idempotent (it edits the same named
+   shapes in place, never duplicates them).
+
+**Common review note → fix:**
+
+| What the reviewer says | Likely cause | Fix |
+|---|---|---|
+| "slide 5's caption box is too big / too tall" | nominal box height larger than the text needs | `--slide 5 --shrink-box` |
+| "slide 5's caption is too wide / runs off the edge" | wide nominal box | `--slide 5 --width-in 2.5` (then `--verify`) |
+| "slide 12's caption overlaps the photo / a number on it" | image-baked text the placer can't see (geometry is blind to text *inside* a picture) | `--slide 12 --move below` (or `right`/`above`); if all sides are crowded, `--shrink-box` then `--move` |
+| "slide 8's caption sits on the title / body text" | a layout the placer mis-measured (e.g. a tall multi-line title) | `--slide 8 --move below`, or `--nudge-y 200000` to push it down |
+| "slide 3's caption is wrong / describes the wrong thing" | a confidently-wrong vision caption (the highest-visibility, otherwise-silent failure) | `--slide 3 --text "Photo: <correct subject>"` |
+| "the caption text is too small / too faint to read" | font size or color | `--slide N --font-size 11 --font-color 000000` |
+| "the white box behind the caption looks bad on this slide" | the default white card clashes with the background | `--slide N --bg-color "" --border-color ""` (100% transparent — both the fill and the border become `noFill`) |
+| "two captions on one slide overlap each other" | two pictures close together | move one: `--slide N --which 2 --move right` |
+| slide has several pictures and you mean a specific one | ambiguous target | add `--which N` (top-to-bottom) or `--hash <image-hash from the audit CSV>` |
+
+**Known limits the loop cannot fully solve (escalate to a manual slide edit):**
+- **Text rasterized inside a picture** (a number/label baked into the image, no text frame)
+  is invisible to the geometry model, so an auto-placed caption *can* land on it. The fix
+  is to `--move` the caption to a side with clear space; if the picture is full-bleed and no
+  side is clear, the slide needs a manual layout change — caption coverage there is a
+  genuine gap, not something the tool hides.
+- **Caption *correctness*** is never auto-verified. `--verify` checks placement, not whether
+  the words match the picture. Spot-check wording before any external handoff and fix wrong
+  ones with `--text`.
+- A picture with **no clean slot at all** was left uncaptioned by design (look for
+  `flagged-no-slot` / `overlay-fullbleed` in the audit CSV). `fix_captions.py` edits captions
+  that already exist; it does not create a caption for a skipped picture — that one needs a
+  manual layout change first.
+
 ## CLI flag reference
 
 ### `extract_images.py`
@@ -117,6 +189,27 @@ Tell the user:
 | `--no-spellcheck` | off | Disable just the spell-check pass (date/template QC still runs) |
 | `--no-dateqc` | off | Disable just the date/doubled-word/leftover-template scan |
 | `--spellcheck` | (no-op) | Back-compat alias — spell-check is now **default-on**; flag accepted, does nothing |
+
+### `fix_captions.py` (per-slide in-place corrections)
+Each `--slide N` opens an independent correction group (flags reset at the next `--slide`). See Step 8 for the full workflow.
+
+| Flag | Effect |
+|---|---|
+| `--slide N` | Open a correction group targeting slide N (required, repeatable) |
+| `--which N` | Target the Nth caption on the slide (1-based, top-to-bottom). Default: all |
+| `--hash HEX` | Target only the caption whose shape name ends with this image hash |
+| `--shrink-box` | Resize the box height to fit its text |
+| `--height EMU` / `--height-in IN` | Set box height (EMU or inches) |
+| `--width EMU` / `--width-in IN` | Set box width (EMU or inches) |
+| `--move {below\|above\|left\|right\|bottom}` | Re-place the caption cleanly relative to its own picture |
+| `--nudge-x EMU` / `--nudge-y EMU` | Relative shift (+y = down) |
+| `--font-size PT` / `--font-color HEX` / `--italic {true\|false}` / `--font-name NAME` | Restyle the caption text |
+| `--bg-color HEX` (`""`=transparent) / `--border-color HEX` (`""`=off) | Restyle the caption card |
+| `--text "..."` | Replace the caption wording |
+| `--force` | Apply a geometry change even if it would create a placement defect (still reported) |
+| `--dry-run` | Preview every group; write nothing |
+| `--no-backup` | Skip the `.bak.pptx` copy |
+| `--verify` | After saving, re-scan the deck for placement defects (exit 4 if any remain) |
 
 ## QC: spell-check + date/template scan (DEFAULT-ON, flag-only)
 

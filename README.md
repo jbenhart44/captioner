@@ -17,7 +17,7 @@ Captioner is a **Claude Code skill**. The caption-generation step uses Claude Co
 ```bash
 git clone https://github.com/jbenhart44/captioner.git
 cd captioner
-git checkout v0.2.4
+git checkout v0.2.5
 pip install -r requirements.txt
 bash install.sh
 ```
@@ -28,7 +28,7 @@ Then restart Claude Code and run:
 /captioner <path-to-.pptx-or-folder>
 ```
 
-> Prefer a versioned archive? Download the [v0.2.4 release](https://github.com/jbenhart44/captioner/releases/tag/v0.2.4) tarball instead of cloning.
+> Prefer a versioned archive? Download the [v0.2.5 release](https://github.com/jbenhart44/captioner/releases/tag/v0.2.5) tarball instead of cloning.
 
 ## Quick start
 
@@ -45,6 +45,19 @@ In Claude Code, point the skill at a deck or a folder of decks:
 ```
 
 You get back: `<deck>_captioned.pptx` files plus a per-deck `<deck>_audit.csv`.
+
+### Correcting captions after review
+When a reviewer flags a specific slide — *"slide 5's box is too big"*, *"slide 12's caption overlaps the photo"*, *"slide 3's caption is wrong"* — fix it in place by slide number, without re-captioning the deck:
+
+```bash
+python3 scripts/fix_captions.py mydeck_captioned.pptx \
+  --slide 5  --shrink-box \
+  --slide 12 --move below \
+  --slide 3  --text "Photo: solar farm at dusk" \
+  --verify
+```
+
+Run with `--dry-run` first to preview. Each geometry change is re-checked against the placement rules and refused if it would create an overlap (override with `--force`). The deck is backed up to `<deck>.pptx.bak.pptx` before the first write. See [`SKILL.md`](SKILL.md) for the full review-note → fix table and iteration loop.
 
 ## Usage
 
@@ -74,6 +87,18 @@ The full workflow (extract → read → caption → dry-run audit → apply → 
 | `--no-smartart` | off | Disable SmartArt icon captioning |
 | `--quiet` | off | Suppress per-deck progress |
 
+### `fix_captions.py` (per-slide in-place corrections)
+| Flag | Effect |
+|---|---|
+| `--slide N` | Open a correction group for slide N (required, repeatable; flags reset per group) |
+| `--which N` / `--hash HEX` | Target the Nth caption (top-to-bottom) / the caption for a given image hash |
+| `--shrink-box` / `--height(-in)` / `--width(-in)` | Resize the caption box |
+| `--move below\|above\|left\|right\|bottom` / `--nudge-x` / `--nudge-y` | Reposition the caption |
+| `--font-size` / `--font-color` / `--italic` / `--font-name` | Restyle the caption text |
+| `--bg-color ""` / `--border-color ""` | Make the caption card 100% transparent (true `noFill`) |
+| `--text "..."` | Replace the caption wording |
+| `--dry-run` / `--force` / `--no-backup` / `--verify` | Preview / override defect refusal / skip backup / re-scan after saving |
+
 </details>
 
 ## Capabilities
@@ -89,6 +114,7 @@ The full workflow (extract → read → caption → dry-run audit → apply → 
 9. **Deck-level context** — a free-text context string biases caption vocabulary toward the subject.
 10. **Audit CSV trail** — every action (`added`, `fallback-above`, `inside-bottom`, `overlay-fullbleed`, `flagged-no-slot`, `skipped-decorative`, `added-smartart-icon`, `skipped-smartart-text-only`, …) is logged.
 11. **Idempotent re-runs** — captioner shapes carry a content-hash name; `--update-existing` regenerates cleanly with no duplicates.
+12. **Per-slide correction loop** — `fix_captions.py` turns a reviewer's plain-language notes into surgical, in-place fixes (resize, reposition, restyle, retext) by slide number, each re-checked against the placement rules, with `--dry-run` preview and `--verify` re-scan.
 
 ## What captioner does NOT do
 
@@ -112,7 +138,7 @@ MIT — see [`LICENSE`](LICENSE). Copyright (c) 2026 Jake Benhart.
   author  = {Benhart, Jake},
   title   = {Captioner: pedagogical-clarity captions for PowerPoint decks},
   year    = {2026},
-  version = {0.2.4},
+  version = {0.2.5},
   url     = {https://github.com/jbenhart44/captioner}
 }
 ```
