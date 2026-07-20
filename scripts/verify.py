@@ -1,37 +1,47 @@
-"""Verify captioned decks — placement + text-presence gate.
+"""Verify captioned decks — placement + text-presence (+ optional descr) gate.
 
-v0.2.2: the gate now covers ALL FIVE placement defect classes the auditor
-checks, and fails (non-zero exit) on MISSING captions — closing the v0.2.1 gaps
-where verify.py exited "clean" while captions were absent and only 2 of 5
-placement patterns were checked.
+The running gate covers SIX placement defect patterns (the historical A/D
+title/body split is consolidated into the generalized T text-overlap check;
+O and P were added in v0.2.4), plus caption text-presence, plus (v0.3, with
+--descr) WCAG alt-text coverage:
 
 Coordinate checks (all 2D, consistent with apply + audit):
-  - Pattern A: no caption overlaps a slide TITLE placeholder.
+  - Pattern T: no caption overlaps ANY text frame (title, body, subtitle,
+               plain text boxes) — the consolidated form of old Patterns A + D.
   - Pattern B: no caption bottom is within FOOTER_CLEARANCE_EMU of the footer.
-  - Pattern C: no caption box is geometrically inside its picture
-               (SmartArt-icon captions are exempt — they sit inside the
-               diagram by design).
-  - Pattern D: no caption overlaps a BODY/SUBTITLE placeholder with text.
+  - Pattern C: no caption box is geometrically inside a picture
+               (SmartArt-icon and band captions are exempt by design).
   - Pattern E: no two captions on the same slide overlap each other.
+  - Pattern O: no caption's text overflows its box (longest-word width check).
+  - Pattern P: no band caption buries a small/structural picture.
+
+--descr (v0.3): every enumerated, hashable picture must be covered — either
+decorative-marked (PowerPoint-native adec:decorative extension) or carrying a
+non-empty descr. Sub-states reported DISTINCTLY: captioner-authored (matches
+the descr-audit oracle) vs preserved pre-existing (unknown provenance) —
+never collapsed into one number. Unhashable pictures are excluded + counted.
 
 Audit rows with action='overlay-fullbleed' or 'flagged-no-slot' are treated
 as known-missing (intentionally skipped placement), not text-mismatch errors.
 
-Exit codes: 0 = clean; 4 = a placement defect (A/B/C/D/E); 5 = a missing
-caption (text-miss); 2 = usage/IO error. The TOTAL line always prints every
-count so nothing is hidden behind the code.
+Exit codes: 0 = clean; 4 = a placement defect (T/B/C/E/O/P); 5 = a missing
+caption (text-miss); 6 = (--descr) a picture with no descr and no decorative
+mark; 2 = usage/IO error. Precedence when multiple fire: 5, then 4, then 6.
+The TOTAL line always prints every count so nothing is hidden behind the code.
 
 Usage:
-  python3 verify.py <work_dir>
+  python3 verify.py <work_dir> [--descr]
 
 Reads:
   <work_dir>/captions.json
   <work_dir>/captioned_decks/<deck>_captioned.pptx
-  <work_dir>/audit/<deck>_audit.csv  (optional — used to honor known-skip rows)
+  <work_dir>/audit/<deck>_audit.csv        (optional — honors known-skip rows)
+  <work_dir>/audit/<deck>_descr_audit.csv  (--descr; the authored-vs-preserved oracle)
 """
 import sys, os, json, hashlib, glob, csv
 from pptx import Presentation
-from _oxml_pics import iter_slide_pics, resolve_blob, guess_ext
+from _oxml_pics import iter_slide_pics, resolve_blob, guess_ext, NS
+from _descr_writer import is_decorative_marked, load_descr_oracle
 from _geometry import (
     slide_footer_top, slide_text_obstacle_rects,
     FOOTER_CLEARANCE_EMU, rect_intersect_area, CAPTION_NAME_PREFIXES,
@@ -105,9 +115,12 @@ def _overlaps_2d(cap_ltwh, obs_ltrb, vfrac=0.15):
 
 
 def main():
-    if len(sys.argv) != 2:
+    argv = sys.argv[1:]
+    check_descr = '--descr' in argv
+    pos = [a for a in argv if a != '--descr']
+    if len(pos) != 1:
         print(__doc__); sys.exit(2)
-    work = os.path.abspath(sys.argv[1])
+    work = os.path.abspath(pos[0])
     captions_path = os.path.join(work, "captions.json")
     if not os.path.exists(captions_path):
         print(f"ERROR: {captions_path} not found"); sys.exit(2)
@@ -121,10 +134,13 @@ def main():
     print("=" * 79)
 
     grand = {"decks": 0, "T": 0, "B": 0, "C": 0, "E": 0, "O": 0, "P": 0,
-             "text_miss": 0, "skips": 0, "unhashable": 0}
+             "text_miss": 0, "skips": 0, "unhashable": 0,
+             "d_auth": 0, "d_pres": 0, "d_dec": 0, "d_miss": 0}
     for path in sorted(glob.glob(os.path.join(captioned_dir, "*_captioned.pptx"))):
         deck = os.path.basename(path).replace("_captioned.pptx", "")
         known_skip = load_known_skips(audit_dir, deck)
+        descr_oracle = load_descr_oracle(audit_dir, deck) if check_descr else {}
+        d_auth = d_pres = d_dec = d_miss = 0
         prs = Presentation(path)
         H = prs.slide_height
         # v0.2.5: repeated-background hashes (same image on >= BG_REPEAT_THRESHOLD
@@ -173,6 +189,20 @@ def main():
                                   pic.get("ext_cx"), pic.get("ext_cy"))
                 if None not in (ox, oy, cx, cy) and h not in bg_hashes_v:
                     slide_pic_rects.append((int(ox), int(oy), int(cx), int(cy)))
+                # v0.3 --descr coverage: reading the detached element is safe
+                # (read-only); sub-states stay distinct, never one percentage.
+                if check_descr:
+                    _cnvpr = pic["el"].find(".//p:cNvPr", NS)
+                    _dv = (pic.get("old_descr") or "").strip()
+                    if is_decorative_marked(_cnvpr):
+                        d_dec += 1
+                    elif _dv:
+                        if descr_oracle.get(h, "").strip() == _dv:
+                            d_auth += 1
+                        else:
+                            d_pres += 1   # pre-existing, unknown provenance
+                    else:
+                        d_miss += 1
                 key = f"{deck}/{h}.{ext}"
                 expected = captions.get(key)
                 if not expected or expected.strip().lower() in ("[decorative]", "decorative"):
@@ -246,11 +276,17 @@ def main():
         print(f"{deck[:33]:<34}{total_pics:>5}{n_caps:>4}{skip_known:>4}"
               f"{t_fail:>3}{b_fail:>3}{c_fail:>3}{e_fail:>3}{o_fail:>3}{p_fail:>3}"
               f"{text_miss:>5}{ok:>5}")
+        if check_descr:
+            d_ok = "✓" if d_miss == 0 else "✗"
+            print(f"{'':<34}descr: authored={d_auth} preserved-pre-existing="
+                  f"{d_pres} decorative={d_dec} MISSING={d_miss} {d_ok}")
         grand["decks"] += 1
         for k, v in (("T", t_fail), ("B", b_fail), ("C", c_fail),
                      ("O", o_fail), ("P", p_fail),
                      ("E", e_fail), ("text_miss", text_miss),
-                     ("skips", skip_known), ("unhashable", unhashable)):
+                     ("skips", skip_known), ("unhashable", unhashable),
+                     ("d_auth", d_auth), ("d_pres", d_pres),
+                     ("d_dec", d_dec), ("d_miss", d_miss)):
             grand[k] += v
 
     print("=" * 79)
@@ -259,10 +295,18 @@ def main():
           f"C(in-pic)={grand['C']} E(cap-cap)={grand['E']} | "
           f"text-miss={grand['text_miss']} | known-skips={grand['skips']} | "
           f"unhashable={grand['unhashable']}")
+    if check_descr:
+        print(f"DESCR: authored={grand['d_auth']} | preserved-pre-existing "
+              f"(unknown provenance)={grand['d_pres']} | decorative-marked="
+              f"{grand['d_dec']} | MISSING={grand['d_miss']}")
     placement_fail = any(grand[k] for k in ("T", "B", "C", "E", "O", "P"))
     if grand["text_miss"] > 0:
         sys.exit(5)
-    sys.exit(4 if placement_fail else 0)
+    if placement_fail:
+        sys.exit(4)
+    if check_descr and grand["d_miss"] > 0:
+        sys.exit(6)
+    sys.exit(0)
 
 
 if __name__ == "__main__":

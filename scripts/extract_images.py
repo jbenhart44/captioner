@@ -1,7 +1,7 @@
 """Extract unique images from .pptx (or all .pptx in a folder) into a work dir.
 
 Usage:
-  python3 extract_images.py <input.pptx-or-folder> <work_dir> [--context "Biology 101 Lecture 3"]
+  python3 extract_images.py <input.pptx-or-folder> <work_dir> [--context "Biology 101 — cell mitosis and the cell cycle"]
 
 Produces:
   <work_dir>/manifest.json
@@ -20,12 +20,13 @@ from pptx import Presentation
 from pptx.enum.shapes import MSO_SHAPE_TYPE
 from _oxml_pics import iter_slide_pics, resolve_blob, guess_ext, NS
 
-# NOTE (adversarial-review fix): picture enumeration moved off the
+# NOTE (enumeration fix 2026-05-18): picture enumeration moved off the
 # python-pptx `shape_type == PICTURE` walk and onto a strict raw-OOXML
 # slide-spTree `.//p:pic` enumeration (see _oxml_pics.py). The old walk typed
 # placeholder-hosted and OLE-fallback `<p:pic>` as PLACEHOLDER and silently
-# dropped them (505 ~12%, 507 88%, 534 97% coverage). Hashes stay byte-identical
-# (slide.part.related_part(rId).blob == old pic.image.blob, proven end-to-end).
+# dropped them (observed coverage impact ranged widely across decks). Hashes stay
+# byte-identical (slide.part.related_part(rId).blob == old pic.image.blob, proven
+# end-to-end).
 
 
 def extract_text_context(slide):
@@ -113,8 +114,29 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument('input', help='Single .pptx or a directory of .pptx files')
     ap.add_argument('work_dir', help='Output working directory')
-    ap.add_argument('--context', default='', help='Deck-level overarching context (e.g., "Biology 101, Lecture 3: Mitosis")')
+    ap.add_argument('--context', default='', help='Deck-level overarching context (e.g., "Biology 101 — cell mitosis and the cell cycle")')
+    ap.add_argument('--no-context-prompt', action='store_true',
+                    help='Suppress the interactive domain-context prompt even when --context is empty (for scripted/non-interactive runs)')
     args = ap.parse_args()
+
+    # Domain-context prompt (added 2026-07-19, user directive). Good alt-text /
+    # captions are often domain-specific — an MRI scan, a perceptron diagram, and
+    # a supply-chain flow each need the right vocabulary. When no --context was
+    # supplied and a human is at an interactive terminal, ask for the course /
+    # subject context so authored captions can be domain-appropriate. Claude-driven
+    # (skill) runs pass --context explicitly per SKILL.md Step 1, so this prompt is
+    # skipped for them; --no-context-prompt also suppresses it for scripted runs.
+    if not args.context and not args.no_context_prompt and sys.stdin.isatty():
+        try:
+            entered = input(
+                "\nDomain context for these slides? Good alt-text is often "
+                "domain-specific.\n  e.g. \"Biology 101 — cell mitosis and the "
+                "cell cycle\"\n  (press Enter to skip): "
+            ).strip()
+        except EOFError:
+            entered = ''
+        if entered:
+            args.context = entered
 
     inp = os.path.abspath(args.input)
     work = os.path.abspath(args.work_dir)

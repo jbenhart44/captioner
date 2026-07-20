@@ -30,12 +30,17 @@ Improvements (from Gemini review v1/v2):
   - Per-deck progress prints
   - Per-deck try/except — corrupt/password-protected file does not halt batch
 """
-import sys, os, json, shutil, csv, hashlib, argparse, re
+import sys, os, json, shutil, csv, hashlib, argparse, re, datetime
 from collections import Counter
 from pptx import Presentation
 from pptx.enum.shapes import MSO_SHAPE_TYPE
 from pptx.util import Emu, Pt
 from _oxml_pics import iter_slide_pics, resolve_blob, guess_ext
+from _descr_writer import (
+    iter_live_pic_cnvprs, decide_descr, apply_decision, derive_alt_text,
+    is_decorative_marked, get_descr, load_descr_oracle, write_descr_audit,
+    DECORATIVE_MARK,
+)
 from _geometry import (
     slide_footer_top as _g_slide_footer_top,
     slide_text_obstacle_rects as _g_text_rects,
@@ -45,7 +50,7 @@ from _geometry import (
     MIN_CAPTION_HEIGHT as _G_MIN_CAPTION_HEIGHT,
 )
 
-# PACE player_b fix 2026-05-18: pic enumeration switched to the strict
+# Enumeration fix 2026-05-18: pic enumeration switched to the strict
 # raw-OOXML slide-spTree `.//p:pic` walk (see _oxml_pics.py), matching
 # extract/verify exactly. Placement geometry reads the pic's own
 # <a:off>/<a:ext> EMU; verified byte-identical to the old pic.left/.top/
@@ -692,6 +697,14 @@ def apply_to_deck(deck_info, captions, captioned_dir, audit_dir, style, opts):
     caption_oracle = (load_caption_oracle(audit_dir, deck)
                       if opts['update_existing'] else {})
 
+    # v0.3 alt-text: prior descr-audit oracle (hash -> last captioner-written
+    # descr). Loaded BEFORE this run overwrites the descr audit, so a value
+    # that no longer matches reads as a human hand-edit (preserved).
+    descr_oracle = (load_descr_oracle(audit_dir, deck)
+                    if opts['write_descr'] else {})
+    descr_rows = []
+    _run_ts = datetime.datetime.now().isoformat(timespec='seconds')
+
     if opts['dry_run']:
         # Don't copy; we'll only inspect
         prs = Presentation(src)
@@ -813,7 +826,7 @@ def apply_to_deck(deck_info, captions, captioned_dir, audit_dir, style, opts):
                         # then estimate height, so the footer math below uses the
                         # height the box will actually occupy — not the nominal
                         # 200k (a long label wrapping to 3 lines near the footer
-                        # otherwise grows down past it: a near-footer icon-caption case).
+                        # otherwise grows down past it: a near-footer long-label case).
                         name_text = p['name'] or ''
                         # v0.2.5: icon-proportional sizing. A small icon gets a
                         # smaller caption so the card never dwarfs it. Font scales
@@ -856,7 +869,7 @@ def apply_to_deck(deck_info, captions, captioned_dir, audit_dir, style, opts):
                         # wrap a multi-word label instead of ballooning the width).
                         # ~3x icon width keeps multi-word labels short enough that
                         # they don't wrap tall and collide on dense, near-footer icon
-                        # strips (the dense near-footer icon strip). The 5pt font
+                        # strips (a dense near-footer icon-caption case). The 5pt font
                         # above is what makes the card smaller; over-narrowing width
                         # just trades width for height and reintroduces overlaps.
                         _w_cap = max(_need_w, min(ic_width, max(p['cx'] * 3, 460000)))
@@ -886,8 +899,8 @@ def apply_to_deck(deck_info, captions, captioned_dir, audit_dir, style, opts):
                             ic_top = max(0, effective_footer_limit - ic_h)
                         # v0.2.2: guarantee footer safety regardless of branch.
                         # An icon that itself sits in/below the footer band (a
-                        # SmartArt overflowing into the footer zone — the a footer-zone
-                        # icon case) would otherwise push its 'above'
+                        # SmartArt overflowing into the footer zone — a footer-
+                        # overflowing icon case) would otherwise push its 'above'
                         # caption into the band. Clamp the bottom to the limit.
                         ic_top = min(ic_top, max(0, effective_footer_limit - ic_h))
                         # v0.2.2 Fix-E for SmartArt icons: nudge the icon caption
@@ -907,7 +920,7 @@ def apply_to_deck(deck_info, captions, captioned_dir, audit_dir, style, opts):
                         # If it STILL overlaps another caption and can't move clear
                         # (e.g. a 6-icon strip whose last icon sits in the footer
                         # zone, so its caption is clamped up into its neighbour —
-                        # the dense near-footer icon strip), SKIP rather than ship
+                        # a dense near-footer icon-caption case), SKIP rather than ship
                         # an overlap. Parity with the main-caption no-slot policy.
                         if not clear_all_obstacles_2d(ic_rect, placed_caps, vfrac=0.02):
                             audit_rows.append({
@@ -960,7 +973,11 @@ def apply_to_deck(deck_info, captions, captioned_dir, audit_dir, style, opts):
                     })
 
         # (per-slide geometry init moved above the SmartArt loop)
-        for pic in iter_slide_pics(slide):
+        # v0.3 alt-text: live-tree cNvPr list, positionally aligned with
+        # iter_slide_pics (spike-1 verified: pic['el'] is DETACHED — a descr
+        # write through it silently no-ops, so writes go through these).
+        _live_cnvprs = iter_live_pic_cnvprs(slide) if opts['write_descr'] else []
+        for _pic_i, pic in enumerate(iter_slide_pics(slide)):
             depth = pic['depth']
             pic_id = pic['pic_id']
             if pic['rid'] is None:
@@ -986,6 +1003,48 @@ def apply_to_deck(deck_info, captions, captioned_dir, audit_dir, style, opts):
             h = hashlib.sha256(blob).hexdigest()[:12]
             key = f"{deck}/{h}.{ext}"
             caption = captions.get(key)
+
+            # === v0.3 alt-text (OOXML descr) — independent of visible-caption
+            # placement; handled BEFORE the decorative/background/no-caption
+            # skips so full-bleed / no-slot pictures still get descr. ===
+            if opts['write_descr']:
+                _live = _live_cnvprs[_pic_i] if _pic_i < len(_live_cnvprs) else None
+                if (_live is None or _live[1] is None
+                        or _live[2] != pic['pic_id']):
+                    # Positional pairing failed the pic_id cross-check: refuse
+                    # to write a guess (spike-1 discipline — fail loudly).
+                    _d_act, _d_val, _cur = 'descr-skipped-resolve-failed', None, ''
+                else:
+                    _cur = get_descr(_live[1])
+                    _marked = is_decorative_marked(_live[1])
+                    # Decorative signals: vision [decorative], repeated-background
+                    # hash, OR a pre-existing PowerPoint decorative mark (the
+                    # instructor's own judgment — the strongest signal; never
+                    # author descr text onto an already-decorative picture).
+                    _dec_sig = ((caption is not None and caption.strip().lower()
+                                 in ('[decorative]', 'decorative', ''))
+                                or h in bg_hashes or _marked)
+                    _alt = (derive_alt_text(caption)
+                            if (caption and not _dec_sig) else None)
+                    _d_act, _d_val = decide_descr(
+                        _cur, descr_oracle.get(h), _dec_sig, _alt, _marked,
+                        replace_autogen=opts['replace_autogen_descr'],
+                        force_overwrite_edits=opts.get('force_overwrite_edits',
+                                                       False))
+                    if not opts['dry_run']:
+                        apply_decision(_live[1], _d_val)
+                descr_rows.append({
+                    'slide': s_idx, 'pic_id': pic_id, 'image_hash': h,
+                    'prior_descr': _cur,
+                    'new_descr': ('' if _d_val in (None, DECORATIVE_MARK)
+                                  else _d_val),
+                    'action': (f'dry-run-would-{_d_act}' if opts['dry_run']
+                               else _d_act),
+                    'run_timestamp': _run_ts,
+                })
+                if opts['descr_only']:
+                    continue   # alt-text-only mode: skip visible captioning
+            # === end v0.3 alt-text block ===
 
             if caption is None:
                 audit_rows.append({
@@ -1083,7 +1142,7 @@ def apply_to_deck(deck_info, captions, captioned_dir, audit_dir, style, opts):
             # matched by GEOMETRY, not pic_id. iter_slide_pics assigns the same
             # pic_id (often 0) to multiple pictures on a slide, so a pic_id match
             # wrongly drops a DIFFERENT picture from the obstacles and lets the
-            # caption land on it (two stacked pictures sharing a pic_id). Geometry is
+            # caption land on it (a two-equation / stacked-figure case). Geometry is
             # unique per visible picture; if two pictures truly coincide, excluding
             # both is harmless (they occupy the same space).
             own_pic = (p_left, p_top, p_left + p_width, p_top + p_height)
@@ -1121,7 +1180,7 @@ def apply_to_deck(deck_info, captions, captioned_dir, audit_dir, style, opts):
                 pick = ('added', c_left, below_top, c_width, _h_for(c_width))
             # 2. Small bottom-of-picture band — PREFERRED over above/beside so the
             #    caption stays WITH its own photo (at its bottom) instead of drifting
-            #    up into the title/body text region (a text-crowded placement). The band is
+            #    up into the title/body text region (the slide-26 case). The band is
             #    small (BAND_FONT_PT). Skipped for a small/thin/structural picture
             #    where a band would bury its content (it then falls to above/beside).
             if pick is None:
@@ -1282,6 +1341,10 @@ def apply_to_deck(deck_info, captions, captioned_dir, audit_dir, style, opts):
 
     if not opts['dry_run']:
         prs.save(dst)
+    if opts['write_descr']:
+        # Own CSV (never merged into the visible-caption audit): the oracle for
+        # the NEXT run's hand-edit detection. Dry-run writes its own filename.
+        write_descr_audit(audit_dir, deck, descr_rows, dry_run=opts['dry_run'])
     if audit_rows:
         # Dry-run writes its OWN file so it can never clobber a prior real
         # apply audit (the 2026-05-18 overwrite hiccup).
@@ -1326,6 +1389,7 @@ def apply_to_deck(deck_info, captions, captioned_dir, audit_dir, style, opts):
         'rows': audit_rows, 'n_caption_shapes_removed': n_caption_shapes_removed,
         'n_preserved_edits': n_preserved_edits,
         'spell_rows': spell_rows, 'qc_rows': qc_rows,
+        'descr_rows': descr_rows,
     }
 
 
@@ -1345,6 +1409,10 @@ def main():
     ap.add_argument('--force-overwrite-edits', action='store_true', help='With --update-existing, remove even captions that look instructor-edited (default: preserve them).')
     ap.add_argument('--no-smartart', action='store_true', help='Disable SmartArt captioning (SmartArt captions are auto-generated from diagram text content, on by default)')
     ap.add_argument('--bg-repeat-threshold', type=int, default=4, help='An image whose identical hash appears on >= this many slides is treated as a repeated background/template and skipped (decorative), even if vision captioned it. Default 4; set 0 to disable.')
+    # v0.3 WCAG alt-text (OOXML descr) flags
+    ap.add_argument('--write-descr', action='store_true', help='ALSO write WCAG alt-text: the OOXML descr attribute on each picture (derived from the same captions.json value, category prefix stripped) and PowerPoint-native decorative marking for decorative/background pictures. Preserve-by-default: any pre-existing descr not written by captioner is left untouched. Emits audit/<deck>_descr_audit.csv (the idempotency oracle for future runs).')
+    ap.add_argument('--descr-only', action='store_true', help='Alt-text ONLY: implies --write-descr and skips visible caption placement entirely (no text boxes added). Use for decks that need descr coverage without on-slide caption cards.')
+    ap.add_argument('--replace-autogen-descr', action='store_true', help='With --write-descr: replace a pre-existing descr ONLY when it matches the documented narrow autogen pattern list ("...Description automatically generated", a bare image filename like image.png, or "A picture containing ..."). Default OFF — unknown-provenance descr is preserved.')
     ap.add_argument('--quiet', action='store_true', help='Suppress per-deck progress lines')
     # QC is ON BY DEFAULT (spell-check + name-verify tagging + date/template QC).
     ap.add_argument('--quick', action='store_true', help='Captioning ONLY — skip ALL QC (spell-check + date/template scan). Use when you explicitly do not want QC.')
@@ -1389,11 +1457,14 @@ def main():
         'dry_run': args.dry_run, 'update_existing': args.update_existing,
         'force_overwrite_edits': args.force_overwrite_edits,
         'gap_emu': args.gap_emu, 'height_emu': args.height_emu,
-        'caption_smartart': not args.no_smartart,
+        'caption_smartart': not args.no_smartart and not args.descr_only,
         'bg_repeat_threshold': args.bg_repeat_threshold,
         'spellcheck': do_spell and sp_status == 'ready',
         'dateqc': do_dateqc, 'qc_dir': qc_dir,
         '_sp': sp_engine, '_wl': sp_wl,
+        'write_descr': args.write_descr or args.descr_only,
+        'descr_only': args.descr_only,
+        'replace_autogen_descr': args.replace_autogen_descr,
     }
 
     if args.dry_run:
@@ -1423,10 +1494,18 @@ def main():
         print("=== date/template QC ON (default; FLAG-ONLY): "
               "qc/<deck>_qc.csv emitted ===")
 
+    if opts['write_descr']:
+        mode_label = 'alt-text ONLY (no visible captions)' if opts['descr_only'] \
+            else 'visible captions + alt-text'
+        print(f"=== WCAG alt-text (descr) ON — {mode_label}; preserve-by-default"
+              f"{'; autogen replacement ON' if opts['replace_autogen_descr'] else ''}"
+              " — audit/<deck>_descr_audit.csv ===")
+
     total_added = total_skipped = total_pics = total_removed = total_errored = 0
     total_spell = total_qc = total_verify = total_preserved = 0
     decks_with_errors = []
     action_counter = Counter()   # categorized coverage across all decks
+    descr_counter = Counter()    # v0.3 alt-text action tally across all decks
     for i, (deck_name, deck_info) in enumerate(manifest.items(), 1):
         if 'error' in deck_info:
             total_errored += 1
@@ -1444,6 +1523,7 @@ def main():
             continue
         rows = result['rows']
         action_counter.update(r['action'] for r in rows)
+        descr_counter.update(r['action'] for r in result.get('descr_rows', []))
         added = sum(1 for r in rows if r['action'].startswith('added') or r['action'] in ('fallback-above','fallback-bottom') or r['action'].startswith('dry-run-would'))
         skipped = sum(1 for r in rows if r['action'].startswith('skipped'))
         if not args.quiet:
@@ -1531,6 +1611,29 @@ def main():
     if no_slot:
         print(f"  ⚠ Report to stakeholders: {no_slot} pictures have NO visible caption "
               "(no clean placement slot) — see overlay-fullbleed/flagged-no-slot audit rows.")
+    if opts['write_descr'] and descr_counter:
+        # v0.3 alt-text sub-states — reported DISTINCTLY, never collapsed into
+        # one "covered" percentage (preserved unknown-provenance descr must stay
+        # visible, not be laundered into newly-authored coverage numbers).
+        def _dsum(*acts):
+            return sum(cnt for a, cnt in descr_counter.items()
+                       if a.replace('dry-run-would-', '') in acts)
+        d_auth = _dsum('descr-authored', 'descr-authored-forced',
+                       'descr-updated', 'descr-replaced-autogen')
+        d_ours = _dsum('descr-unchanged')
+        d_pre = _dsum('descr-preserved-pre-existing')
+        d_edit = _dsum('descr-preserved-hand-edit')
+        d_dec = _dsum('descr-decorative-marked', 'descr-decorative-marked-forced',
+                      'descr-decorative-replaced-autogen',
+                      'descr-decorative-unchanged')
+        d_none = _dsum('descr-skipped-no-caption')
+        d_fail = _dsum('descr-skipped-resolve-failed')
+        print(f"Alt-text (descr): authored/updated={d_auth} unchanged-ours={d_ours} "
+              f"decorative-marked={d_dec} | preserved pre-existing (unknown "
+              f"provenance, NOT newly-authored)={d_pre} preserved hand-edit={d_edit} "
+              f"| no-caption={d_none}"
+              + (f" | RESOLVE-FAILED={d_fail} ⚠ (element pairing refused — inspect)"
+                 if d_fail else ""))
     print(f"{'='*72}")
     if spellcheck_degraded:
         sys.exit(3)
