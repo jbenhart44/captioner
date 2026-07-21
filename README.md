@@ -40,29 +40,38 @@ Captioner is a **Claude Code skill**. The caption-generation step uses Claude Co
 - Python 3.9+
 - `python-pptx`, `lxml`, `Pillow`, and `pyspellchecker` — all in `requirements.txt` (the installer checks each one and tells you if any is missing)
 
-## Install
+## Install (one command)
 
-> **Before you run it:** `install.sh` touches exactly one path on your system —
-> `~/.claude/skills/captioner` (or `$CLAUDE_SKILLS_DIR/captioner`) — which it creates as a
-> symlink pointing at this cloned folder. If a captioner install already exists there, the
-> installer prints exactly what it is about to remove *before* removing it. Nothing outside
-> that one path is read, written, or deleted.
+Open your Terminal and run this — it downloads the v0.3.0 release, installs the dependencies, and
+sets captioner up:
 
 ```bash
-git clone https://github.com/jbenhart44/captioner.git
-cd captioner
-git checkout v0.3.0
-pip install -r requirements.txt
-bash install.sh
+curl -L https://github.com/jbenhart44/captioner/releases/download/v0.3.0/captioner-0.3.0.zip -o captioner.zip \
+  && unzip -o captioner.zip && cd captioner-0.3.0 \
+  && pip install -r requirements.txt && bash install.sh
 ```
 
-Then restart Claude Code and run:
+**Where it lands:** the installer symlinks captioner into your Claude Code skills directory at
+`~/.claude/skills/captioner` (or `$CLAUDE_SKILLS_DIR/captioner`) — that one path is all it touches,
+and it prints exactly what it does before it acts. The download itself unzips into a
+`captioner-0.3.0/` folder in whatever directory you ran the command from; you can keep or delete
+that folder afterward (the working install lives in the skills directory).
+
+**Then restart Claude Code and use it:**
 
 ```
-/captioner <path-to-.pptx-or-folder>
+/captioner <path-to-your-deck.pptx-or-a-folder-of-decks>
 ```
 
-> Prefer a versioned archive? Download the [v0.3.0 release](https://github.com/jbenhart44/captioner/releases/tag/v0.3.0) tarball instead of cloning.
+Add `--write-descr` to also write screen-reader alt-text, or `--descr-only` for alt-text with no
+visible captions. Captioner reads your `.pptx` and writes a **new** captioned copy plus an audit CSV
+into a working folder — **your original file is never changed.**
+
+> **Installing with Claude Code itself?** Just tell Claude: *"install captioner from
+> https://github.com/jbenhart44/captioner — run the one-command install from the README."*
+> Claude will run the `curl … && … && bash install.sh` line above for you.
+
+> Prefer git? `git clone https://github.com/jbenhart44/captioner.git && cd captioner && git checkout v0.3.0 && pip install -r requirements.txt && bash install.sh` works too.
 
 ### Updating to a new version
 
