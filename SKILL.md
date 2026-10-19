@@ -241,7 +241,7 @@ Hard guarantees:
 - **pyspellchecker is required for the default spell-check.** Missing it is a LOUD failure: banner + `qc/SPELLCHECK_NOT_RUN.txt` + **exit 3** (captions still applied). Use a Python with `pyspellchecker`, or pass `--no-spellcheck`/`--quick` to proceed deliberately without it.
 
 ## What this skill does NOT do
-- Write to the WCAG `descr` alt-text XML field (separate workflow).
+- Write alt-text unless asked — the OOXML `descr` field is authored only with `--write-descr` or `--descr-only`, and alt-text a deck already has is never overwritten.
 - Auto-correct spelling — the default QC only *reports* suspects (and web-verifies names before suggesting); it never rewrites slide or caption text.
 - Read off chart values — captions identify "this is a chart of X", they don't read figures.
 - Modify the picture itself, slide master, or existing slide shapes (other than captioner-prior shapes via `--update-existing`).
@@ -340,9 +340,7 @@ the same height estimate + mutual-collision nudge. The "own picture" is identifi
 **geometry, not pic_id** (`iter_slide_pics` can assign the same pic_id to multiple
 pictures, which previously let a caption land on a *different* picture).
 
-Net effect on the 49-deck validation corpus: **0** off-slide / text-overlap / caption-in-picture
-/ caption–caption / footer defects (`verify.py` exits 0; the auditor's only remaining
-rows are per-slide summaries). The gate patterns are **T** (text overlap), **B**
+The gate patterns are **T** (text overlap), **B**
 (footer), **C** (in-picture, band/icon exempt), **E** (caption–caption), plus missing-caption.
 
 ### Two more defect classes (v0.2.4) — overflow + structural-picture coverage
@@ -373,7 +371,6 @@ classes *at the moment it is written*; this does not cover post-delivery edits, 
 auto-size growth beyond the height estimate, or guarantee that a group-nested (depth≥1)
 picture's caption is visually adjacent to its picture (only that it is defect-free) — those
 cases are surfaced as skips in `coverage_report.csv` / the audit CSV, never shipped silently.
-Planning provenance: `pcvplans/research_runs/2026-05-29_234427/` (2-DF /pcv-research).
 
 ## Known limits
 

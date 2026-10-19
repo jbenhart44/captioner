@@ -1,0 +1,30 @@
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        python: ["3.9", "3.12"]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+      - name: Smoke test (extract -> apply --dry-run on the bundled deck)
+        run: python3 tests/test_smoke.py
+      - name: Alt-text engine tests
+        run: python3 tests/test_descr_writer.py
+      - name: Placement and safety regression tests
+        run: python3 tests/test_placement.py
+      - name: Mutation check (each suite must catch the defect it guards)
+        run: python3 tests/mutation_check.py

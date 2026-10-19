@@ -4,6 +4,29 @@ All notable changes to captioner are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0] - 2026-10-19
+
+Minor release: proof, not features. No behaviour change in any script.
+
+### Added
+
+- **`tests/test_placement.py`** — 15 regression checks for the placement and safety logic that had
+  only been tested locally: 2D obstacle clearance, full-rect body obstacles, every text frame as an
+  obstacle (captioner's own shapes excluded), caption height growth, the pre-write invariant
+  predicates (text overlap, in-picture, off-slide), and edit-aware removal on re-run.
+- **`tests/mutation_check.py`** — injects four real defects into `scripts/` (overlap treated as
+  clear; a hand-edited caption deleted on re-run; hand-edited alt-text overwritten; pre-existing
+  alt-text overwritten) and requires the matching suite to fail and name the check that caught it.
+  Each script is restored and re-hashed after its mutant runs.
+- **Continuous integration** (`.github/workflows/tests.yml`) — all four test files on
+  `ubuntu-latest` and `macos-latest`, Python 3.9 and 3.12, on every push to `main` and every pull
+  request. None needs Claude Code or a network connection.
+
+### Changed
+
+- README: tests badge, a "run the tests" block in Quick start, the mutation check under
+  Reliability, and install commands pinned to v0.4.0.
+
 ## [0.3.0] - 2026-07-19
 
 Minor release. Captioner can now write WCAG alt-text (the OOXML `descr`

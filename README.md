@@ -1,5 +1,7 @@
 # Captioner
 
+[![tests](https://github.com/jbenhart44/captioner/actions/workflows/tests.yml/badge.svg)](https://github.com/jbenhart44/captioner/actions/workflows/tests.yml)
+
 *A visible caption under every picture in a PowerPoint deck, plus optional WCAG alt-text (the OOXML `descr` field) for images that lack one — with an auditable trail.*
 
 Captioner inserts a short (5–15 word) italic caption directly below every picture in a `.pptx` deck. The caption identifies *what the picture is* — so sighted readers know at a glance, and so a reviewer has a written record of every visual on every slide.
@@ -42,19 +44,19 @@ Captioner is a **Claude Code skill**. The caption-generation step uses Claude Co
 
 ## Install (one command)
 
-Open your Terminal and run this — it downloads the v0.3.0 release, installs the dependencies, and
+Open your Terminal and run this — it downloads the v0.4.0 release, installs the dependencies, and
 sets captioner up:
 
 ```bash
-curl -L https://github.com/jbenhart44/captioner/releases/download/v0.3.0/captioner-0.3.0.zip -o captioner.zip \
-  && unzip -o captioner.zip && cd captioner-0.3.0 \
+curl -L https://github.com/jbenhart44/captioner/releases/download/v0.4.0/captioner-0.4.0.zip -o captioner.zip \
+  && unzip -o captioner.zip && cd captioner-0.4.0 \
   && pip install -r requirements.txt && bash install.sh
 ```
 
 **Where it lands:** the installer symlinks captioner into your Claude Code skills directory at
 `~/.claude/skills/captioner` (or `$CLAUDE_SKILLS_DIR/captioner`) — that one path is all it touches,
 and it prints exactly what it does before it acts. The download itself unzips into a
-`captioner-0.3.0/` folder in whatever directory you ran the command from; you can keep or delete
+`captioner-0.4.0/` folder in whatever directory you ran the command from; you can keep or delete
 that folder afterward (the working install lives in the skills directory).
 
 **Then restart Claude Code and use it:**
@@ -71,14 +73,14 @@ into a working folder — **your original file is never changed.**
 > https://github.com/jbenhart44/captioner — run the one-command install from the README."*
 > Claude will run the `curl … && … && bash install.sh` line above for you.
 
-> Prefer git? `git clone https://github.com/jbenhart44/captioner.git && cd captioner && git checkout v0.3.0 && pip install -r requirements.txt && bash install.sh` works too.
+> Prefer git? `git clone https://github.com/jbenhart44/captioner.git && cd captioner && git checkout v0.4.0 && pip install -r requirements.txt && bash install.sh` works too.
 
 ### Updating to a new version
 
 ```bash
 cd captioner
 git fetch --tags
-git checkout <new-version-tag>      # e.g. v0.3.0 — replace with the version you want
+git checkout <new-version-tag>      # e.g. v0.4.0 — replace with the version you want
 pip install -r requirements.txt     # re-run: cheap, and a version bump can add a dependency
 bash install.sh                     # safe to re-run — a same-target relink just prints "nothing to do"
 ```
@@ -89,9 +91,13 @@ Then restart Claude Code. Stay on a tagged release — do not run `git checkout 
 ## Quick start
 
 ```bash
-# Smoke test against the bundled synthetic deck
-python3 tests/test_smoke.py
+python3 tests/test_smoke.py          # extract -> apply --dry-run on the bundled synthetic deck
+python3 tests/test_descr_writer.py   # alt-text engine: preserve-by-default, decorative marking, coverage gate
+python3 tests/test_placement.py      # placement and safety: 2D clearance, footer, edit-aware re-runs
+python3 tests/mutation_check.py      # proves each suite catches the defect it guards
 ```
+
+None of these needs Claude Code or a network connection. CI runs all four on Linux and macOS, Python 3.9 and 3.12, on every push to `main` and every pull request.
 
 In Claude Code, point the skill at a deck or a folder of decks:
 
@@ -184,6 +190,8 @@ The full workflow (extract → read → caption → dry-run audit → apply → 
 
 What backs each run is the verification gate, not a track record. Every deck is checked by an independent verifier for six placement defect classes — text-overlap, footer intrusion, caption-inside-picture, caption-on-caption, text overflow, and a band caption burying a small/structural picture — in 2D coordinates, plus (with `--descr`) an alt-text coverage gate that confirms every picture is either given a `descr` value or marked decorative. The verifier exits non-zero on any defect, so a caption over text, off-slide, inside another picture, or overlapping another caption cannot ship silently. Source decks are preserved unmodified, and every run produces a reproducible per-deck audit CSV.
 
+The tests are held to the same standard. `tests/mutation_check.py` injects the defects the suites exist to prevent (a caption allowed to overlap an obstacle, a hand-edited caption deleted on re-run, hand-edited or pre-existing alt-text overwritten) and requires the matching suite to go red and name the check that caught it.
+
 ## License
 
 MIT — see [`LICENSE`](LICENSE). Copyright (c) 2026 Jake Benhart.
@@ -195,7 +203,7 @@ MIT — see [`LICENSE`](LICENSE). Copyright (c) 2026 Jake Benhart.
   author  = {Benhart, Jake},
   title   = {Captioner: pedagogical-clarity captions for PowerPoint decks},
   year    = {2026},
-  version = {0.3.0},
+  version = {0.4.0},
   url     = {https://github.com/jbenhart44/captioner}
 }
 ```
