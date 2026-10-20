@@ -23,7 +23,8 @@ those specific fields.
 ## What captioner reads and writes
 
 Captioner **reads** the `.pptx` file(s) you point it at and the images embedded inside them (via
-Claude Code's built-in vision — no external API, no network call). Your **original `.pptx` is never
+Claude Code's built-in vision: captioner calls no API of its own and needs no API key, but Claude Code sends
+each image to Anthropic's API, or to the provider you run Claude Code through, so the model can read it). Your **original `.pptx` is never
 modified**. Each run **writes** into a working directory you choose:
 
 - a new captioned copy at `<work_dir>/captioned_decks/<deck>_captioned.pptx`

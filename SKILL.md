@@ -62,7 +62,7 @@ Produces `<work-dir>/manifest.json` and `<work-dir>/images/<deck>/<hash>.<ext>`.
 
 ### Step 3 — Read images and generate brief captions
 For each unique image:
-1. Use the `Read` tool on the image file (Claude Code's vision, no external API).
+1. Use the `Read` tool on the image file (Claude Code's vision: no separate API or key, but Claude Code sends the image to its model provider, Anthropic's API by default).
 2. Generate a caption per the STRICT RULES above.
 3. If the manifest carries a `deck_context` for the picture's deck, use it to bias the caption.
 4. Build `<work-dir>/captions.json` mapping `"<deck>/<hash>.<ext>": "<short caption>"`.
