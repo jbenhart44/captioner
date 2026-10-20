@@ -4,6 +4,35 @@ All notable changes to captioner are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.0] - 2026-10-19
+
+### Changed
+
+- **A re-run never duplicates captions.** `apply_captions.py` now refuses a deck that already holds
+  captioner shapes unless `--update-existing` is passed: it prints the shape count and the flag,
+  writes no deck and no audit CSV for that deck, and exits 4.
+  Before, the same run silently added a second set of captions.
+
+### Fixed
+
+- **`--update-existing` left in-picture band captions behind.** Shapes named `captioner_capband_`
+  were not stripped, so each update added another copy. They are now stripped like ordinary captions,
+  and kept when a person has edited them.
+- **The mutation check could report a mutant caught on the exit code alone.** A check counted as
+  "named" if its name appeared anywhere in the output, and check names also appear on PASS lines. A
+  name now counts only on a FAIL line or a traceback line. Proven with a control mutant whose
+  expected check stays green: the new harness reports it MISSED, the old one reported it caught.
+- **SKILL.md described video wrongly** ("skipped silently"). Measured: a video's poster frame is
+  captioned like a picture. The edge-case table now says so.
+
+### Added
+
+- **`tests/test_rerun.py`** (10 checks): a real extract → apply run on the bundled deck, a second run
+  on its own output (refused, nothing written), the same run with `--update-existing` (same caption
+  count, no duplicates), and band-caption counting, removal, and keeping a band caption a person edited.
+  Three new mutants (7/7 caught). CI
+  runs it on Linux and macOS, Python 3.9 and 3.12.
+
 ## [0.4.0] - 2026-10-19
 
 Minor release: proof, not features. No behaviour change in any script.

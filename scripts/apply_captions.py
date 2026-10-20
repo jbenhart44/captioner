@@ -24,9 +24,10 @@ Improvements (from Gemini review v1/v2):
   - --font-name / --font-size / --font-color / --italic: caption styling
   - --gap-emu / --height-emu: layout offsets
   - Recursive traversal into GROUP shapes
-  - Re-run protection: detects `_captioned` suffix on input + warns
-  - Idempotency: caption shapes get name prefix "captioner_caption_<hash>" so re-runs can
-    detect + with --update-existing flag, remove and re-add (else: append, leading to duplicates)
+  - Re-run protection (v0.5.0): a deck that already holds captioner shapes is REFUSED (exit 4,
+    nothing written for it) unless --update-existing is passed; a `_captioned` suffix also warns
+  - Idempotency: caption shapes get name prefix "captioner_caption_<hash>" (or "captioner_capband_"
+    for in-picture band captions) so --update-existing can find, remove and re-add them
   - Per-deck progress prints
   - Per-deck try/except — corrupt/password-protected file does not halt batch
 """
@@ -64,7 +65,28 @@ CAPTION_BAND_NAME_PREFIX = 'captioner_capband_'   # caption deliberately in own-
 BAND_FONT_PT = 6   # in-picture band captions render SMALL — overlap less photo, fit tight spots
 SMARTART_SHAPE_NAME_PREFIX = 'captioner_smartart_'  # idempotency marker for SmartArt captions
 SMARTART_ICON_SHAPE_NAME_PREFIX = 'captioner_sa_icon_'  # idempotency marker for per-icon SmartArt captions
+CAPTIONER_SHAPE_PREFIXES = (CAPTION_SHAPE_NAME_PREFIX, CAPTION_BAND_NAME_PREFIX,
+                            SMARTART_SHAPE_NAME_PREFIX, SMARTART_ICON_SHAPE_NAME_PREFIX)
+EXIT_ALREADY_CAPTIONED = 4
 MIN_CAPTION_HEIGHT = 250000
+
+
+class AlreadyCaptionedError(Exception):
+    """The source deck already holds captioner shapes and --update-existing was not passed."""
+
+
+def count_captioner_shapes(prs):
+    """Number of shapes captioner added to this deck in an earlier run (any of its name prefixes)."""
+    n = 0
+    for slide in prs.slides:
+        for sh in slide.shapes:
+            try:
+                name = sh.name or ''
+            except Exception:
+                continue
+            if name.startswith(CAPTIONER_SHAPE_PREFIXES):
+                n += 1
+    return n
 
 NS_A = '{http://schemas.openxmlformats.org/drawingml/2006/main}'
 NS_DGM_REL = '{http://schemas.openxmlformats.org/drawingml/2006/diagram}'
@@ -642,12 +664,14 @@ def remove_previous_caption_shapes(slide, target_pic_hash=None,
             name = sh.name or ''
         except Exception:
             continue
-        if not name.startswith(CAPTION_SHAPE_NAME_PREFIX):
+        prefix = next((p for p in (CAPTION_SHAPE_NAME_PREFIX, CAPTION_BAND_NAME_PREFIX)
+                       if name.startswith(p)), None)
+        if prefix is None:
             continue
         if target_pic_hash is not None and not name.endswith(target_pic_hash):
             continue
         if oracle and not force_overwrite_edits:
-            h = name[len(CAPTION_SHAPE_NAME_PREFIX):]
+            h = name[len(prefix):]
             orig = oracle.get(h)
             try:
                 cur = sh.text_frame.text if getattr(sh, 'has_text_frame', False) else ''
@@ -691,6 +715,16 @@ def apply_to_deck(deck_info, captions, captioned_dir, audit_dir, style, opts):
 
     dst_name = f"{deck}_captioned.pptx" if not deck.endswith('_captioned') else f"{deck}.pptx"
     dst = os.path.join(captioned_dir, dst_name)
+
+    # v0.5.0: refuse to caption a deck that already carries captioner shapes unless asked to
+    # replace them. Checked BEFORE anything is copied or written, so a refused deck leaves no output.
+    if not opts['update_existing']:
+        n_prior = count_captioner_shapes(Presentation(src))
+        if n_prior:
+            raise AlreadyCaptionedError(
+                f"{src_base} already holds {n_prior} captioner caption shape(s); a re-run would "
+                f"duplicate them. Pass --update-existing to replace them (hand-edited captions are "
+                f"kept), or run on the original, uncaptioned deck.")
 
     # Edit-aware oracle: prior audit CSV (hash -> original caption). Loaded
     # BEFORE we overwrite the audit, so --update-existing can spot hand-edits.
@@ -1405,7 +1439,7 @@ def main():
     ap.add_argument('--italic', type=lambda v: v.lower() in ('1','true','yes','y'), default=True, help='Caption italic (default: true)')
     ap.add_argument('--gap-emu', type=int, default=50000, help='EMU between picture and caption (default: 50000 = ~0.05")')
     ap.add_argument('--height-emu', type=int, default=400000, help='Caption text box height in EMU (default: 400000 = ~0.44")')
-    ap.add_argument('--update-existing', action='store_true', help='Detect and remove previously-added captioner shapes before adding new ones (else re-runs DUPLICATE). Edit-aware: a caption whose text no longer matches the prior audit CSV is treated as an instructor hand-edit and is PRESERVED, not stripped.')
+    ap.add_argument('--update-existing', action='store_true', help='Detect and remove previously-added captioner shapes before adding new ones (without it, a deck that already holds captioner shapes is refused with exit 4). Edit-aware: a caption whose text no longer matches the prior audit CSV is treated as an instructor hand-edit and is PRESERVED, not stripped.')
     ap.add_argument('--force-overwrite-edits', action='store_true', help='With --update-existing, remove even captions that look instructor-edited (default: preserve them).')
     ap.add_argument('--no-smartart', action='store_true', help='Disable SmartArt captioning (SmartArt captions are auto-generated from diagram text content, on by default)')
     ap.add_argument('--bg-repeat-threshold', type=int, default=4, help='An image whose identical hash appears on >= this many slides is treated as a repeated background/template and skipped (decorative), even if vision captioned it. Default 4; set 0 to disable.')
@@ -1504,6 +1538,7 @@ def main():
     total_added = total_skipped = total_pics = total_removed = total_errored = 0
     total_spell = total_qc = total_verify = total_preserved = 0
     decks_with_errors = []
+    decks_refused = []           # already captioned and no --update-existing (v0.5.0)
     action_counter = Counter()   # categorized coverage across all decks
     descr_counter = Counter()    # v0.3 alt-text action tally across all decks
     for i, (deck_name, deck_info) in enumerate(manifest.items(), 1):
@@ -1515,6 +1550,10 @@ def main():
             continue
         try:
             result = apply_to_deck(deck_info, captions, captioned_dir, audit_dir, style, opts)
+        except AlreadyCaptionedError as e:
+            decks_refused.append(deck_name)
+            print(f"[{i}/{len(manifest)}] {deck_name:<35} REFUSED: {e}")
+            continue
         except Exception as e:
             total_errored += 1
             decks_with_errors.append(deck_name)
@@ -1634,7 +1673,11 @@ def main():
               f"| no-caption={d_none}"
               + (f" | RESOLVE-FAILED={d_fail} ⚠ (element pairing refused — inspect)"
                  if d_fail else ""))
+    if decks_refused:
+        print(f"REFUSED (already captioned; re-run with --update-existing to replace): {decks_refused}")
     print(f"{'='*72}")
+    if decks_refused:
+        sys.exit(EXIT_ALREADY_CAPTIONED)
     if spellcheck_degraded:
         sys.exit(3)
 
