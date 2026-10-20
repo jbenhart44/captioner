@@ -93,7 +93,7 @@ Produces `<work-dir>/captioned_decks/<deck>_captioned.pptx`, `<work-dir>/audit/<
 
 **pyspellchecker is required for the default spell-check.** It is an optional dependency only in the sense that captioning still works without it — but because spell-check is now default-on, a missing `pyspellchecker` is treated as a **loud failure**: captioner prints a banner, drops `qc/SPELLCHECK_NOT_RUN.txt`, and **exits 3** (captions still applied). Either run via a Python that has `pyspellchecker` installed, or pass `--no-spellcheck` / `--quick` to explicitly proceed without it. (If a system Python blocks `pip install` under PEP 668, install into a virtual environment.)
 
-**Re-runs**: if the user re-runs against the same source, the previous captioner text boxes are recognizable by their shape name prefix `captioner_caption_<hash>`. Pass `--update-existing` to strip the prior captions before adding new ones; otherwise re-runs will DUPLICATE captions (added behind the prior text box).
+**Re-runs**: if the user re-runs against the same source, the previous captioner text boxes are recognizable by their shape name prefix `captioner_caption_<hash>`. Pass `--update-existing` to strip the prior captions before adding new ones; without it, a deck that already holds captioner shapes is refused (exit 4, nothing written for it), so captions are never duplicated.
 
 ### Step 6 — Verify (6-pattern placement gate + caption presence, + optional alt-text coverage)
 ```bash
@@ -212,7 +212,7 @@ Always work the loop the same way:
 | `--italic` | true | Italic on/off (`true`/`false`) |
 | `--gap-emu` | 50000 | EMU between picture and caption (~0.05") |
 | `--height-emu` | 400000 | Caption box height (~0.44") |
-| `--update-existing` | off | Strip prior captioner shapes before adding new ones (idempotent re-run). **Edit-aware**: a caption whose text no longer matches the prior audit CSV is treated as an instructor hand-edit and PRESERVED; backs up the prior output to `<deck>_captioned.pptx.bak.pptx` |
+| `--update-existing` | off | Strip prior captioner shapes before adding new ones (idempotent re-run). Without it, a deck that already holds captioner shapes is refused (exit 4) instead of being captioned twice. **Edit-aware**: a caption whose text no longer matches the prior audit CSV is treated as an instructor hand-edit and PRESERVED; backs up the prior output to `<deck>_captioned.pptx.bak.pptx` |
 | `--force-overwrite-edits` | off | With `--update-existing`, remove even captions that look instructor-edited |
 | `--no-smartart` | off | Disable SmartArt icon captioning (on by default; auto-extracts icon names from SVG metadata) |
 | `--bg-repeat-threshold` | 4 | An identical image hash appearing as a structural picture on ≥ this many slides is treated as a repeated background/template and skipped (`skipped-decorative-background`), even if vision captioned it. Set `0` to disable. |
@@ -406,10 +406,10 @@ cases are surfaced as skips in `coverage_report.csv` / the audit CSV, never ship
 | Caption on dark slide background | Caption sits in a white card (`--bg-color FFFFFF` default) with light gray border, so it's readable regardless of slide background |
 | Hidden shape (`cNvPr hidden="1"`) | Skipped — invisible shapes don't need visible captions |
 | Picture fills entire slide | No clean slot → caption SKIPPED + flagged `overlay-fullbleed` (never placed on top of the image) |
-| Re-run on `_captioned.pptx` output | Without `--update-existing`: duplicates captions. With: strips prior captioner shapes and re-adds. |
-| Re-run on source with prior captioner shapes | Same as above — captioner shapes carry name prefix `captioner_caption_<hash>` |
+| Re-run on `_captioned.pptx` output | Without `--update-existing`: **refused** (exit 4; no deck or audit written for it), so captions are never duplicated. With: strips prior captioner shapes (ordinary and in-picture band captions) and re-adds; hand-edited captions are kept. |
+| Re-run on source with prior captioner shapes | Same as above — captioner shapes carry the name prefixes `captioner_caption_`, `captioner_capband_`, `captioner_smartart_` and `captioner_sa_icon_` |
 | Multi-language slide text | Context extraction works; captions still emitted in English |
-| Animated picture / video | Treated as Picture if shape_type matches; otherwise skipped silently |
+| Animated picture / video | A video's poster frame is extracted and captioned like a picture (measured 2026-10-19 with a python-pptx `add_movie` deck); the audit row does not say it is a video. An animated GIF is captioned as a picture. |
 
 ## Provenance
 Built 2026-05-10 for lecture-deck accessibility remediation (compliance image-tagging).

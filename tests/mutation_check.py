@@ -23,6 +23,7 @@ SUITES = {
     "smoke": REPO / "tests" / "test_smoke.py",
     "descr": REPO / "tests" / "test_descr_writer.py",
     "placement": REPO / "tests" / "test_placement.py",
+    "rerun": REPO / "tests" / "test_rerun.py",
 }
 # (why it matters, file, exact source line, the broken version, suite, strings the red run must show)
 MUTANTS = [
@@ -38,6 +39,17 @@ MUTANTS = [
     ("alt-text the deck already had is overwritten (preserve-by-default broken)",
      "scripts/_descr_writer.py", "    return 'descr-preserved-pre-existing', None", "    return 'descr-authored', alt_text",
      "descr", ["test_decide_descr_matrix"]),
+    ("a re-run on an already-captioned deck duplicates its captions (no refusal)",
+     "scripts/apply_captions.py", "        if n_prior:", "        if False:",
+     "rerun", ["a second run without --update-existing refuses", "a refused run writes no deck"]),
+    ("--update-existing leaves in-picture band captions behind, so they duplicate",
+     "scripts/apply_captions.py", "for p in (CAPTION_SHAPE_NAME_PREFIX, CAPTION_BAND_NAME_PREFIX)",
+     "for p in (CAPTION_SHAPE_NAME_PREFIX,)",
+     "rerun", ["--update-existing strips band captions"]),
+    ("a deck holding only band captions is not seen as already captioned",
+     "scripts/apply_captions.py", "CAPTIONER_SHAPE_PREFIXES = (CAPTION_SHAPE_NAME_PREFIX, CAPTION_BAND_NAME_PREFIX,",
+     "CAPTIONER_SHAPE_PREFIXES = (CAPTION_SHAPE_NAME_PREFIX,",
+     "rerun", ["a band caption counts as a captioner shape"]),
 ]
 
 
@@ -77,7 +89,11 @@ def main() -> int:
             print(f"BROKEN  {why}: the mutant did not import (a broken mutant tests nothing)")
             holes.append(why)
             continue
-        missing = [m for m in must if m not in out]
+        # A name counts only where it is reported as failing: a FAIL line, or a traceback line
+        # ("File ..., line N, in <test>"). Check names also appear on PASS lines, so a plain
+        # substring test would call a mutant caught on the exit code alone.
+        missing = [m for m in must
+                   if not any(m in ln and ("FAIL" in ln or ", line " in ln) for ln in out.splitlines())]
         caught = p.returncode != 0 and not missing
         print(f"{'CAUGHT' if caught else 'MISSED'}  {why}" + (f"  (red run did not name: {missing})" if missing else ""))
         if not caught:

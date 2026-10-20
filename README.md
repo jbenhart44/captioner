@@ -44,19 +44,19 @@ Captioner is a **Claude Code skill**. The caption-generation step uses Claude Co
 
 ## Install (one command)
 
-Open your Terminal and run this — it downloads the v0.4.0 release, installs the dependencies, and
+Open your Terminal and run this — it downloads the v0.5.0 release, installs the dependencies, and
 sets captioner up:
 
 ```bash
-curl -L https://github.com/jbenhart44/captioner/releases/download/v0.4.0/captioner-0.4.0.zip -o captioner.zip \
-  && unzip -o captioner.zip && cd captioner-0.4.0 \
+curl -L https://github.com/jbenhart44/captioner/releases/download/v0.5.0/captioner-0.5.0.zip -o captioner.zip \
+  && unzip -o captioner.zip && cd captioner-0.5.0 \
   && pip install -r requirements.txt && bash install.sh
 ```
 
 **Where it lands:** the installer symlinks captioner into your Claude Code skills directory at
 `~/.claude/skills/captioner` (or `$CLAUDE_SKILLS_DIR/captioner`) — that one path is all it touches,
 and it prints exactly what it does before it acts. The download itself unzips into a
-`captioner-0.4.0/` folder in whatever directory you ran the command from; you can keep or delete
+`captioner-0.5.0/` folder in whatever directory you ran the command from; you can keep or delete
 that folder afterward (the working install lives in the skills directory).
 
 **Then restart Claude Code and use it:**
@@ -73,14 +73,14 @@ into a working folder — **your original file is never changed.**
 > https://github.com/jbenhart44/captioner — run the one-command install from the README."*
 > Claude will run the `curl … && … && bash install.sh` line above for you.
 
-> Prefer git? `git clone https://github.com/jbenhart44/captioner.git && cd captioner && git checkout v0.4.0 && pip install -r requirements.txt && bash install.sh` works too.
+> Prefer git? `git clone https://github.com/jbenhart44/captioner.git && cd captioner && git checkout v0.5.0 && pip install -r requirements.txt && bash install.sh` works too.
 
 ### Updating to a new version
 
 ```bash
 cd captioner
 git fetch --tags
-git checkout <new-version-tag>      # e.g. v0.4.0 — replace with the version you want
+git checkout <new-version-tag>      # e.g. v0.5.0 — replace with the version you want
 pip install -r requirements.txt     # re-run: cheap, and a version bump can add a dependency
 bash install.sh                     # safe to re-run — a same-target relink just prints "nothing to do"
 ```
@@ -175,7 +175,7 @@ The full workflow (extract → read → caption → dry-run audit → apply → 
 8. **Text-only SmartArt skip** — diagrams whose only content is text labels are intentionally not captioned.
 9. **Deck-level context** — a free-text context string biases caption vocabulary toward the subject.
 10. **Audit CSV trail** — every action (`added`, `fallback-above`, `inside-bottom`, `overlay-fullbleed`, `flagged-no-slot`, `skipped-decorative`, `added-smartart-icon`, `skipped-smartart-text-only`, …) is logged.
-11. **Idempotent re-runs** — captioner shapes carry a content-hash name; `--update-existing` regenerates cleanly with no duplicates.
+11. **Idempotent re-runs** — captioner shapes carry a content-hash name; `--update-existing` regenerates cleanly with no duplicates, and a re-run without it on an already-captioned deck is refused (exit 4) rather than captioning it twice.
 12. **Per-slide correction loop** — `fix_captions.py` turns a reviewer's plain-language notes into surgical, in-place fixes (resize, reposition, restyle, retext) by slide number, each re-checked against the placement rules, with `--dry-run` preview and `--verify` re-scan.
 
 ## What captioner does NOT do
@@ -203,7 +203,7 @@ MIT — see [`LICENSE`](LICENSE). Copyright (c) 2026 Jake Benhart.
   author  = {Benhart, Jake},
   title   = {Captioner: pedagogical-clarity captions for PowerPoint decks},
   year    = {2026},
-  version = {0.4.0},
+  version = {0.5.0},
   url     = {https://github.com/jbenhart44/captioner}
 }
 ```
